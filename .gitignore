@@ -1,0 +1,6 @@
+# Large dumpstate files (100-200MB each)
+*.txt
+*.log
+!README.md
+!battery_analyzer.py
+!.gitignore
