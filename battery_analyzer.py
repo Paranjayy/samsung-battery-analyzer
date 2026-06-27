@@ -1,33 +1,49 @@
 #!/usr/bin/env python3
 """
-Samsung Battery Analyzer v2
-===========================
-Parses Samsung dumpstate/dumpState log files and extracts battery health data.
-Works with SysDump logs from *#9900# menu on Samsung devices.
+Universal Android Battery Analyzer
+===================================
+Parses battery health data from Samsung, Realme/Oppo, Xiaomi, and generic Android bugreports.
 
-Supports:
-  - Samsung Galaxy A31, S24, S25, and other Samsung devices
-  - Both old format (dumpstate.txt) and new format (dumpState_*.log)
-  - EFS buffer parsing for detailed battery history
-  - App-level battery usage breakdown
-  - Multi-device comparison reports
-  - First-use date estimation
+Supported Brands & Diagnostic Methods:
+┌─────────────────┬──────────────────┬────────────────────────────────────────┐
+│ Brand           │ Diagnostic Code  │ Data Source                            │
+├─────────────────┼──────────────────┼────────────────────────────────────────┤
+│ Samsung         │ *#9900#          │ SysDump → dumpState_*.log              │
+│ Realme/Oppo     │ *#800#           │ Logkit → bugreport or oplus_log        │
+│ OnePlus         │ *#800#           │ Logkit → bugreport                     │
+│ Xiaomi/Redmi    │ *#*#284#*#*      │ Bugreport → bugreport-*.zip            │
+│ POCO            │ *#*#284#*#*      │ Bugreport → bugreport-*.zip            │
+│ Google Pixel    │ *#*#284#*#*      │ Bugreport → bugreport-*.zip            │
+│ Samsung (alt)   │ *#0*#            │ Hardware test menu (limited)           │
+│ Any Android     │ adb bugreport    │ Standard Android bugreport             │
+└─────────────────┴──────────────────┴────────────────────────────────────────┘
 
 Usage:
-  python3 battery_analyzer.py <file1> [file2] [--json] [--compare] [--apps]
+  python3 battery_analyzer.py <file1> [file2] [--json] [--compare] [--brand samsung|realme|xiaomi|auto]
+
+Examples:
+  python3 battery_analyzer.py dumpstate.txt
+  python3 battery_analyzer.py bugreport-samsung-2026.zip
+  python3 battery_analyzer.py phone1.txt phone2.log --compare
+  python3 battery_analyzer.py oplus_log.txt --brand realme
 """
 
 import json
 import os
 import re
 import sys
+import tempfile
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Dict, List, Optional
+
+# ─── Data Models ────────────────────────────────────────────────────────────
 
 
 @dataclass
 class DeviceInfo:
+    brand: str = "Unknown"
     model: str = "Unknown"
     model_code: str = ""
     android_version: str = ""
@@ -37,35 +53,33 @@ class DeviceInfo:
     network: str = ""
     soc: str = ""
     screen_manufacture_date: str = ""
+    first_use_date: str = ""
 
 
 @dataclass
 class BatteryHealth:
-    asoc: Optional[int] = None
-    usage_cycles_raw: Optional[int] = None
-    max_temp: Optional[float] = None
-    max_current: Optional[int] = None
-    bsoh: Optional[int] = None
+    asoc: Optional[int] = None  # Actual State of Charge %
+    bsoh: Optional[int] = None  # Battery State of Health %
+    cycle_count: Optional[int] = None
     design_capacity_mah: Optional[int] = None
     full_charge_capacity_mah: Optional[int] = None
-    capacity_max: Optional[int] = None
-    kernel_cycles: Optional[int] = None
-    # EFS buffer parsed values
-    efs_asoc: Optional[int] = None
-    efs_cycles: Optional[int] = None
-    efs_design_cap: Optional[int] = None
-    efs_full_charge_cap: Optional[int] = None
-    efs_max_temp: Optional[float] = None
+    max_temp_c: Optional[float] = None
+    max_current_ma: Optional[int] = None
+    current_voltage_mv: Optional[int] = None
+    current_soc: Optional[int] = None
+    health_status: str = ""  # Good, Overheat, Dead, etc.
+    charge_status: str = ""  # Charging, Discharging, Full, etc.
+    technology: str = ""  # Li-ion, Li-poly, etc.
 
 
 @dataclass
 class BatterySnapshot:
+    timestamp: str = ""
     voltage_mv: Optional[int] = None
     current_ma: Optional[int] = None
     soc_percent: Optional[int] = None
-    temp_tenths: Optional[int] = None
+    temp_c: Optional[float] = None
     status: str = ""
-    health: str = ""
 
 
 @dataclass
@@ -85,427 +99,944 @@ class ChargeSession:
     total_usage_mah: float = 0.0
     screen_on_time: str = ""
     screen_off_time: str = ""
-    apps: list = field(default_factory=list)
+    apps: List[AppUsage] = field(default_factory=list)
 
 
 @dataclass
 class BatteryStats:
     device: DeviceInfo = field(default_factory=DeviceInfo)
     health: BatteryHealth = field(default_factory=BatteryHealth)
-    snapshots: list = field(default_factory=list)
+    snapshots: List[BatterySnapshot] = field(default_factory=list)
     charge_session: ChargeSession = field(default_factory=ChargeSession)
-    battery_saver_on: Optional[bool] = None
     battery_level: Optional[int] = None
+    battery_saver_on: Optional[bool] = None
     screen_on_total: str = ""
     file_size_mb: float = 0.0
     file_name: str = ""
+    parser_brand: str = ""
 
 
-def parse_device_info(line: str, stats: BatteryStats):
-    if line.startswith("Build:"):
-        stats.device.build = line.split("Build:", 1)[1].strip()
-    elif line.startswith("Build fingerprint:"):
-        fp = line.split("Build fingerprint:", 1)[1].strip().strip("'")
-        parts = fp.split("/")
-        if len(parts) >= 2:
-            stats.device.model_code = parts[1]
-        m = re.search(r":(\d+)/", fp)
+# ─── Brand-Specific Parsers ─────────────────────────────────────────────────
+
+
+class SamsungParser:
+    """Parser for Samsung dumpstate/dumpState log files.
+
+    Data sources:
+    - DUMP OF SERVICE battery → mSavedBatteryAsoc, mSavedBatteryUsage, etc.
+    - healthd: efs_buf → raw battery history
+    - sec_bat_get_battery_info → live voltage/current/temp
+    - sec_bat_monitor_work → cycle count
+    - DC.BatteryUsage → per-app battery drain
+    """
+
+    @staticmethod
+    def can_parse(file_path: str, first_lines: str) -> bool:
+        indicators = [
+            "samsung",
+            "A315",
+            "S921",
+            "S926",
+            "S928",
+            "S923",
+            "A54",
+            "A55",
+            "A34",
+            "A25",
+            "A15",
+            "dumpState_",
+            "sec-battery",
+            "mSavedBattery",
+            "One UI",
+        ]
+        return any(ind in first_lines for ind in indicators)
+
+    @staticmethod
+    def parse(file_path: str, stats: BatteryStats):
+        stats.parser_brand = "Samsung"
+        stats.device.brand = "Samsung"
+        in_battery_dump = False
+        in_dc_usage = False
+        line_count = 0
+
+        with open(file_path, "r", errors="replace") as f:
+            for line in f:
+                line_count += 1
+                ls = line.strip()
+
+                if line_count <= 20:
+                    SamsungParser._parse_header(ls, stats)
+                if line_count > 400000:
+                    SamsungParser._parse_properties(ls, stats)
+
+                if "DUMP OF SERVICE battery:" in ls:
+                    in_battery_dump = True
+                elif in_battery_dump and ls.startswith("DUMP OF SERVICE "):
+                    in_battery_dump = False
+
+                if in_battery_dump:
+                    SamsungParser._parse_battery_service(ls, stats)
+
+                if "DC.BatteryUsage" in ls:
+                    in_dc_usage = True
+                    SamsungParser._parse_dc_usage(ls, stats)
+                elif in_dc_usage and ls.strip() and "DC.BatteryUsage" not in ls:
+                    if ls.startswith("    ") or ls.startswith("\t"):
+                        SamsungParser._parse_dc_usage(ls, stats)
+                    else:
+                        in_dc_usage = False
+
+                if "sec_bat_get_battery_info:" in ls:
+                    SamsungParser._parse_kernel_info(ls, stats)
+                elif "sec_bat_monitor_work:" in ls:
+                    SamsungParser._parse_monitor_work(ls, stats)
+                elif "capacity_max" in ls or "CAP_NOM" in ls:
+                    SamsungParser._parse_capacity(ls, stats)
+                if "healthd: efs_buf:" in ls:
+                    SamsungParser._parse_efs_buf(ls, stats)
+                if "manufactureDate=" in ls and "DisplayDevice" in ls:
+                    SamsungParser._parse_screen_date(ls, stats)
+
+                SamsungParser._parse_battery_level(ls, stats)
+
+    @staticmethod
+    def _parse_header(ls, stats):
+        if ls.startswith("Build:"):
+            stats.device.build = ls.split("Build:", 1)[1].strip()
+        elif ls.startswith("Build fingerprint:"):
+            fp = ls.split("Build fingerprint:", 1)[1].strip().strip("'")
+            parts = fp.split("/")
+            if len(parts) >= 2:
+                stats.device.model_code = parts[1]
+            m = re.search(r":(\d+)/", fp)
+            if m:
+                stats.device.android_version = m.group(1)
+        elif ls.startswith("Network:"):
+            stats.device.network = ls.split("Network:", 1)[1].strip()
+        elif "Kernel:" in ls and not stats.device.kernel:
+            stats.device.kernel = ls.split("Kernel:", 1)[1].strip()[:100]
+
+    @staticmethod
+    def _parse_properties(ls, stats):
+        m = re.search(r"\[ro\.build\.date\]:\s*\[(.+?)\]", ls)
         if m:
-            stats.device.android_version = m.group(1)
-    elif line.startswith("Network:"):
-        stats.device.network = line.split("Network:", 1)[1].strip()
-    elif "Kernel:" in line and not stats.device.kernel:
-        stats.device.kernel = line.split("Kernel:", 1)[1].strip()[:100]
+            stats.device.build_date = m.group(1)
+        m = re.search(r"\[ro\.product\.model\]:\s*\[(.+?)\]", ls)
+        if m:
+            stats.device.model = f"Samsung ({m.group(1)})"
+        m = re.search(r"\[ro\.soc\.manufacturer\]:\s*\[(.+?)\]", ls)
+        if m:
+            stats.device.soc = m.group(1)
 
+    @staticmethod
+    def _parse_battery_service(ls, stats):
+        for pattern, attr in [
+            (r"mSavedBatteryAsoc:\s*\[?(\d+)", "asoc"),
+            (r"mSavedBatteryUsage:\s*\[?(\d+)", "usage_raw"),
+            (r"mSavedBatteryMaxTemp:\s*(\d+)", "max_temp"),
+            (r"mSavedBatteryMaxCurrent:\s*(\d+)", "max_current"),
+            (r"mSavedBatteryBsoh:\s*(\d+)", "bsoh"),
+        ]:
+            m = re.search(pattern, ls)
+            if m:
+                val = int(m.group(1))
+                if attr == "asoc":
+                    stats.health.asoc = val
+                elif attr == "usage_raw":
+                    stats.health.cycle_count = val // 100
+                elif attr == "max_temp":
+                    stats.health.max_temp_c = val / 10.0
+                elif attr == "max_current":
+                    stats.health.max_current_ma = val
+                elif attr == "bsoh":
+                    stats.health.bsoh = val
 
-def parse_saved_battery(line: str, stats: BatteryStats):
-    m = re.search(r"mSavedBatteryAsoc:\s*\[?(\d+)", line)
-    if m:
-        stats.health.asoc = int(m.group(1))
-
-    m = re.search(r"mSavedBatteryUsage:\s*\[?(\d+)", line)
-    if m:
-        stats.health.usage_cycles_raw = int(m.group(1))
-
-    m = re.search(r"mSavedBatteryMaxTemp:\s*(\d+)", line)
-    if m:
-        stats.health.max_temp = int(m.group(1)) / 10.0
-
-    m = re.search(r"mSavedBatteryMaxCurrent:\s*(\d+)", line)
-    if m:
-        stats.health.max_current = int(m.group(1))
-
-    m = re.search(r"mSavedBatteryBsoh:\s*(\d+)", line)
-    if m:
-        stats.health.bsoh = int(m.group(1))
-
-
-def parse_efs_buf(line: str, stats: BatteryStats):
-    """Parse the healthd: efs_buf line for detailed battery history."""
-    m = re.search(r"efs_buf:\s*([\d\s-]+)", line)
-    if not m:
-        return
-
-    values = m.group(1).split()
-    if len(values) < 42:
-        return
-
-    try:
-        vals = [int(v) for v in values]
-    except ValueError:
-        return
-
-    # EFS buffer layout (Samsung-specific):
-    # [36] = ASOC, [7] = cycles, [3-4] = capacity, [16] = max temp
-    # [39] = design capacity, [41] = charge state
-    if vals[36] > 0 and stats.health.efs_asoc is None:
-        stats.health.efs_asoc = vals[36]
-    if vals[7] > 0 and stats.health.efs_cycles is None:
-        stats.health.efs_cycles = vals[7]
-    if vals[3] > 100 and stats.health.efs_design_cap is None:
-        stats.health.efs_design_cap = vals[3]
-    if vals[4] > 100 and stats.health.efs_full_charge_cap is None:
-        stats.health.efs_full_charge_cap = vals[4]
-    if vals[16] > 0 and stats.health.efs_max_temp is None:
-        stats.health.efs_max_temp = vals[16] / 10.0
-
-
-def parse_kernel_battery_info(line: str, stats: BatteryStats):
-    m = re.search(
-        r"sec_bat_get_battery_info:"
-        r"Vnow\((\d+)mV\),.*?"
-        r"Inow\((-?\d+)mA\),.*?"
-        r"SOC\((\d+)%\).*?"
-        r"Tbat\((\d+)\)",
-        line,
-    )
-    if m:
-        snap = BatterySnapshot(
-            voltage_mv=int(m.group(1)),
-            current_ma=int(m.group(2)),
-            soc_percent=int(m.group(3)),
-            temp_tenths=int(m.group(4)),
-            status="Charging" if int(m.group(2)) > 0 else "Discharging",
-        )
-        stats.snapshots.append(snap)
-
-
-def parse_monitor_work(line: str, stats: BatteryStats):
-    m = re.search(r"Cycle\((\d+)", line)
-    if m:
+    @staticmethod
+    def _parse_efs_buf(ls, stats):
+        m = re.search(r"efs_buf:\s*([\d\s-]+)", ls)
+        if not m:
+            return
+        values = m.group(1).split()
+        if len(values) < 42:
+            return
         try:
-            stats.health.kernel_cycles = int(m.group(1))
+            vals = [int(v) for v in values]
         except ValueError:
+            return
+        if stats.health.cycle_count is None and vals[7] > 0:
+            stats.health.cycle_count = vals[7]
+        if stats.health.design_capacity_mah is None and vals[3] > 100:
+            stats.health.design_capacity_mah = vals[3]
+        if stats.health.full_charge_capacity_mah is None and vals[4] > 100:
+            stats.health.full_charge_capacity_mah = vals[4]
+        if stats.health.max_temp_c is None and vals[16] > 0:
+            stats.health.max_temp_c = vals[16] / 10.0
+
+    @staticmethod
+    def _parse_kernel_info(ls, stats):
+        m = re.search(
+            r"Vnow\((\d+)mV\).*?Inow\((-?\d+)mA\).*?SOC\((\d+)%\).*?Tbat\((\d+)\)", ls
+        )
+        if m:
+            stats.snapshots.append(
+                BatterySnapshot(
+                    voltage_mv=int(m.group(1)),
+                    current_ma=int(m.group(2)),
+                    soc_percent=int(m.group(3)),
+                    temp_c=int(m.group(4)) / 10.0,
+                    status="Charging" if int(m.group(2)) > 0 else "Discharging",
+                )
+            )
+
+    @staticmethod
+    def _parse_monitor_work(ls, stats):
+        m = re.search(r"Cycle\((\d+)", ls)
+        if m and stats.health.cycle_count is None:
+            try:
+                stats.health.cycle_count = int(m.group(1))
+            except ValueError:
+                pass
+
+    @staticmethod
+    def _parse_capacity(ls, stats):
+        m = re.search(r"CAP_NOM\s+(\d+)mAh", ls)
+        if m and stats.health.design_capacity_mah in (None, 0):
+            val = int(m.group(1))
+            if val > 0:
+                stats.health.design_capacity_mah = val
+
+    @staticmethod
+    def _parse_screen_date(ls, stats):
+        m = re.search(
+            r"manufactureDate=ManufactureDate\{week=(\d+),\s*year=(\d+)\}", ls
+        )
+        if m:
+            try:
+                dt = datetime.strptime(f"{m.group(2)}-W{m.group(1)}-1", "%Y-W%W-%w")
+                stats.device.screen_manufacture_date = dt.strftime("%B %Y")
+            except ValueError:
+                stats.device.screen_manufacture_date = (
+                    f"Week {m.group(1)}, {m.group(2)}"
+                )
+
+    @staticmethod
+    def _parse_dc_usage(ls, stats):
+        if "DC.BatteryUsage" not in ls:
+            return
+        m = re.search(r"Last charge time:\s*(.+)", ls)
+        if m:
+            stats.charge_session.last_charge_time = m.group(1).strip()
+        m = re.search(r"TotalDischarge\(%\):\s*([\d.]+)", ls)
+        if m:
+            stats.charge_session.total_discharge_percent = float(m.group(1))
+        m = re.search(r"TotalUsage\(mAh\):\s*([\d,]+)", ls)
+        if m:
+            stats.charge_session.total_usage_mah = float(m.group(1).replace(",", ""))
+        m = re.search(r"Screen on time:\s*(.+)", ls)
+        if m:
+            stats.charge_session.screen_on_time = m.group(1).strip()
+        m = re.search(r"Screen off time:\s*(.+)", ls)
+        if m:
+            stats.charge_session.screen_off_time = m.group(1).strip()
+        m = re.search(
+            r"(\d+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*([\d,.]+)\s*\|\s*([\d.]+)\s*\|\s*(\S+)",
+            ls,
+        )
+        if m:
+            stats.charge_session.apps.append(
+                AppUsage(
+                    uid=m.group(1),
+                    active_time=m.group(2).strip(),
+                    background_time=m.group(3).strip(),
+                    usage_mah=float(m.group(4).replace(",", "")),
+                    usage_percent=float(m.group(5)),
+                    package=m.group(6),
+                )
+            )
+
+    @staticmethod
+    def _parse_battery_level(ls, stats):
+        m = re.search(r"mBatteryLevel=(\d+)", ls)
+        if m:
+            stats.battery_level = int(m.group(1))
+        if "Battery saver is currently: ON" in ls:
+            stats.battery_saver_on = True
+        elif "Battery saver is currently: OFF" in ls:
+            stats.battery_saver_on = False
+
+
+class RealmeParser:
+    """Parser for Realme/Oppo/OnePlus bugreports and logkit files.
+
+    How to get battery data on Realme/Oppo/OnePlus:
+    1. Dial *#800# to open Logkit
+    2. Tap "Start Record"
+    3. Use phone normally for a few minutes
+    4. Tap "Stop Record"
+    5. Find the zip in /sdcard/LogKit/
+    6. Or: use `adb bugreport` for full bugreport
+
+    Data sources in bugreport:
+    - DUMP OF SERVICE batterystats → per-app usage
+    - dumpsys battery → current battery state
+    - Battery Health HAL → health info
+    - /sys/class/power_supply/battery/ → kernel-level data
+    """
+
+    @staticmethod
+    def can_parse(file_path: str, first_lines: str) -> bool:
+        indicators = [
+            "oppo",
+            "realme",
+            "oneplus",
+            "oplus",
+            "OPLUS",
+            "OPPO",
+            "REALME",
+            "OnePlus",
+            "coloros",
+            "ColorOS",
+            "hydrogen",
+            "oxygen",
+            "CMF",
+        ]
+        return any(ind in first_lines for ind in indicators)
+
+    @staticmethod
+    def parse(file_path: str, stats: BatteryStats):
+        stats.parser_brand = "Realme/Oppo/OnePlus"
+        stats.device.brand = "Realme/Oppo/OnePlus"
+
+        with open(file_path, "r", errors="replace") as f:
+            for line in f:
+                ls = line.strip()
+                RealmeParser._parse_standard_battery(ls, stats)
+                RealmeParser._parse_dumpsys_battery(ls, stats)
+                RealmeParser._parse_health_hal(ls, stats)
+                RealmeParser._parse_sysfs(ls, stats)
+
+    @staticmethod
+    def _parse_standard_battery(ls, stats):
+        """Parse standard Android battery fields found in bugreports."""
+        m = re.search(r"DUMP OF SERVICE battery:", ls)
+        if m:
+            # Next few lines will have battery info
             pass
 
-    m = re.search(r"Status\((\w+)\)", line)
-    if m and stats.snapshots:
-        stats.snapshots[-1].status = m.group(1)
+        # healthinfo section (Oppo/Realme specific)
+        m = re.search(r"health_info.*?charge_full\s*=\s*(\d+)", ls)
+        if m and stats.health.full_charge_capacity_mah is None:
+            stats.health.full_charge_capacity_mah = int(m.group(1))
 
-    m = re.search(r"Health\((\w+)\)", line)
-    if m and stats.snapshots:
-        stats.snapshots[-1].health = m.group(1)
+        m = re.search(r"health_info.*?charge_full_design\s*=\s*(\d+)", ls)
+        if m and stats.health.design_capacity_mah is None:
+            stats.health.design_capacity_mah = int(m.group(1))
+
+        m = re.search(r"health_info.*?cycle_count\s*=\s*(\d+)", ls)
+        if m and stats.health.cycle_count is None:
+            stats.health.cycle_count = int(m.group(1))
+
+        m = re.search(r"health_info.*?health\s*=\s*(\d+)", ls)
+        if m:
+            health_val = int(m.group(1))
+            # Android BatteryHealth: 2=Good, 3=Overheat, 4=Dead, 5=OverVoltage, 6=UnspecifiedFailure, 7=Cold
+            health_map = {
+                2: "Good",
+                3: "Overheat",
+                4: "Dead",
+                5: "Over Voltage",
+                6: "Failure",
+                7: "Cold",
+                1: "Unknown",
+            }
+            stats.health.health_status = health_map.get(
+                health_val, f"Code {health_val}"
+            )
+
+    @staticmethod
+    def _parse_dumpsys_battery(ls, stats):
+        """Parse 'dumpsys battery' output."""
+        m = re.search(r"level:\s*(\d+)", ls)
+        if m:
+            stats.battery_level = int(m.group(1))
+
+        m = re.search(r"health:\s*(\d+)", ls)
+        if m and not stats.health.health_status:
+            health_val = int(m.group(1))
+            health_map = {
+                2: "Good",
+                3: "Overheat",
+                4: "Dead",
+                5: "Over Voltage",
+                6: "Failure",
+                7: "Cold",
+            }
+            stats.health.health_status = health_map.get(
+                health_val, f"Code {health_val}"
+            )
+
+        m = re.search(r"temperature:\s*(\d+)", ls)
+        if m and stats.health.max_temp_c is None:
+            stats.health.max_temp_c = int(m.group(1)) / 10.0
+
+        m = re.search(r"voltage:\s*(\d+)", ls)
+        if m and stats.health.current_voltage_mv is None:
+            stats.health.current_voltage_mv = int(m.group(1))
+
+        m = re.search(r"technology:\s*(.+)", ls)
+        if m:
+            stats.health.technology = m.group(1).strip()
+
+        m = re.search(r"status:\s*(\d+)", ls)
+        if m:
+            status_map = {
+                1: "Unknown",
+                2: "Charging",
+                3: "Discharging",
+                4: "Not Charging",
+                5: "Full",
+            }
+            stats.health.charge_status = status_map.get(int(m.group(1)), "Unknown")
+
+        m = re.search(r"manufacturer:\s*(.+)", ls)
+        if m:
+            stats.device.brand = m.group(1).strip()
+
+        m = re.search(r"model:\s*(.+)", ls)
+        if m and stats.device.model == "Unknown":
+            stats.device.model = m.group(1).strip()
+
+    @staticmethod
+    def _parse_health_hal(ls, stats):
+        """Parse Battery Health HAL data (Android 10+)."""
+        m = re.search(r"charge_counter.*?(\d+)", ls)
+        if m and stats.health.current_soc is None:
+            stats.health.current_soc = int(m.group(1))
+
+        m = re.search(r"energy_counter.*?(\d+)", ls)
+        if m:
+            pass  # Energy in nWh, could convert
+
+    @staticmethod
+    def _parse_sysfs(ls, stats):
+        """Parse /sys/class/power_supply/battery/ data from bugreport."""
+        m = re.search(r"POWER_SUPPLY_CYCLE_COUNT=(\d+)", ls)
+        if m and stats.health.cycle_count is None:
+            stats.health.cycle_count = int(m.group(1))
+
+        m = re.search(r"POWER_SUPPLY_CHARGE_FULL=(\d+)", ls)
+        if m and stats.health.full_charge_capacity_mah is None:
+            stats.health.full_charge_capacity_mah = (
+                int(m.group(1)) // 1000
+            )  # uAh to mAh
+
+        m = re.search(r"POWER_SUPPLY_CHARGE_FULL_DESIGN=(\d+)", ls)
+        if m and stats.health.design_capacity_mah is None:
+            stats.health.design_capacity_mah = int(m.group(1)) // 1000
+
+        m = re.search(r"POWER_SUPPLY_TEMP=(\d+)", ls)
+        if m and stats.health.max_temp_c is None:
+            stats.health.max_temp_c = int(m.group(1)) / 10.0
+
+        m = re.search(r"POWER_SUPPLY_VOLTAGE_NOW=(\d+)", ls)
+        if m and stats.health.current_voltage_mv is None:
+            stats.health.current_voltage_mv = int(m.group(1)) // 1000  # uV to mV
+
+        m = re.search(r"POWER_SUPPLY_CURRENT_NOW=(-?\d+)", ls)
+        if m and stats.snapshots:
+            stats.snapshots[-1].current_ma = int(m.group(1)) // 1000
 
 
-def parse_capacity_info(line: str, stats: BatteryStats):
-    m = re.search(r"capacity_max\s*\((\d+)\)", line)
-    if m:
-        stats.health.capacity_max = int(m.group(1))
+class XiaomiParser:
+    """Parser for Xiaomi/Redmi/POCO bugreports.
 
-    m = re.search(r"CAP_NOM\s+(\d+)mAh", line)
-    if m:
-        stats.health.design_capacity_mah = int(m.group(1))
+    How to get battery data on Xiaomi:
+    1. Dial *#*#284#*#* for bug report
+    2. Or dial *#*#64663#*#* for CIT hardware test
+    3. Or: Settings → About Phone → tap "MIUI version" 7 times →
+       Developer Options → take bug report
+    4. Or: adb bugreport
+
+    Xiaomi-specific battery data:
+    - mi_battery_info service
+    - /data/system/batterystats/
+    - kernel: /sys/class/power_supply/battery/
+    """
+
+    @staticmethod
+    def can_parse(file_path: str, first_lines: str) -> bool:
+        indicators = [
+            "xiaomi",
+            "redmi",
+            "poco",
+            "Xiaomi",
+            "Redmi",
+            "POCO",
+            "MIUI",
+            "miui",
+            "HyperOS",
+            "hyperos",
+            "qualcomm",
+            "snapdragon",
+            "MediaTek",
+            "MTK",
+        ]
+        return any(ind in first_lines for ind in indicators)
+
+    @staticmethod
+    def parse(file_path: str, stats: BatteryStats):
+        stats.parser_brand = "Xiaomi/Redmi/POCO"
+        stats.device.brand = "Xiaomi"
+
+        with open(file_path, "r", errors="replace") as f:
+            for line in f:
+                ls = line.strip()
+                XiaomiParser._parse_mi_battery(ls, stats)
+                XiaomiParser._parse_standard_battery(ls, stats)
+                XiaomiParser._parse_sysfs(ls, stats)
+                XiaomiParser._parse_mi_props(ls, stats)
+
+    @staticmethod
+    def _parse_mi_battery(ls, stats):
+        """Parse Xiaomi-specific battery service."""
+        m = re.search(r"mi_battery_info.*?cycle_count[=:]\s*(\d+)", ls)
+        if m and stats.health.cycle_count is None:
+            stats.health.cycle_count = int(m.group(1))
+
+        m = re.search(r"mi_battery_info.*?battery_health[=:]\s*(\d+)", ls)
+        if m:
+            health_val = int(m.group(1))
+            health_map = {
+                2: "Good",
+                3: "Overheat",
+                4: "Dead",
+                5: "Over Voltage",
+                6: "Failure",
+                7: "Cold",
+            }
+            stats.health.health_status = health_map.get(
+                health_val, f"Code {health_val}"
+            )
+
+        m = re.search(r"mi_battery_info.*?battery_full_capacity[=:]\s*(\d+)", ls)
+        if m and stats.health.full_charge_capacity_mah is None:
+            stats.health.full_charge_capacity_mah = int(m.group(1))
+
+        m = re.search(r"mi_battery_info.*?battery_design_capacity[=:]\s*(\d+)", ls)
+        if m and stats.health.design_capacity_mah is None:
+            stats.health.design_capacity_mah = int(m.group(1))
+
+    @staticmethod
+    def _parse_standard_battery(ls, stats):
+        """Parse standard Android battery fields."""
+        m = re.search(r"level:\s*(\d+)", ls)
+        if m:
+            stats.battery_level = int(m.group(1))
+
+        m = re.search(r"health:\s*(\d+)", ls)
+        if m and not stats.health.health_status:
+            health_val = int(m.group(1))
+            health_map = {
+                2: "Good",
+                3: "Overheat",
+                4: "Dead",
+                5: "Over Voltage",
+                6: "Failure",
+                7: "Cold",
+            }
+            stats.health.health_status = health_map.get(
+                health_val, f"Code {health_val}"
+            )
+
+        m = re.search(r"temperature:\s*(\d+)", ls)
+        if m and stats.health.max_temp_c is None:
+            stats.health.max_temp_c = int(m.group(1)) / 10.0
+
+        m = re.search(r"voltage:\s*(\d+)", ls)
+        if m and stats.health.current_voltage_mv is None:
+            stats.health.current_voltage_mv = int(m.group(1))
+
+        m = re.search(r"technology:\s*(.+)", ls)
+        if m:
+            stats.health.technology = m.group(1).strip()
+
+    @staticmethod
+    def _parse_sysfs(ls, stats):
+        """Parse sysfs battery data from bugreport."""
+        RealmeParser._parse_sysfs(ls, stats)  # Same sysfs format
+
+    @staticmethod
+    def _parse_mi_props(ls, stats):
+        """Parse Xiaomi system properties."""
+        m = re.search(r"\[ro\.product\.model\]:\s*\[(.+?)\]", ls)
+        if m and stats.device.model == "Unknown":
+            stats.device.model = f"Xiaomi ({m.group(1)})"
+        m = re.search(r"\[ro\.build\.display\.id\]:\s*\[(.+?)\]", ls)
+        if m:
+            stats.device.build = m.group(1)
+        m = re.search(r"\[ro\.miui\.ui\.version\.name\]:\s*\[(.+?)\]", ls)
+        if m:
+            stats.device.build_date = f"MIUI {m.group(1)}"
+        m = re.search(r"\[ro\.product\.vendor\.device\]:\s*\[(.+?)\]", ls)
+        if m:
+            stats.device.model_code = m.group(1)
 
 
-def parse_battery_level(line: str, stats: BatteryStats):
-    m = re.search(r"mBatteryLevel=(\d+)", line)
-    if m:
-        stats.battery_level = int(m.group(1))
+class GenericParser:
+    """Generic parser for any Android bugreport or dumpstate file.
 
-    if "Battery saver is currently: ON" in line:
-        stats.battery_saver_on = True
-    elif "Battery saver is currently: OFF" in line:
-        stats.battery_saver_on = False
+    Works with:
+    - adb bugreport output
+    - Any dumpstate file
+    - Standard Android battery dumps
 
-    # Screen on time
-    m = re.search(r"Screen on:\s*([\dhms\s]+)", line)
-    if m:
-        stats.screen_on_total = m.group(1).strip()
+    How to get a bugreport on any Android:
+    1. Enable Developer Options (tap Build Number 7 times)
+    2. Settings → Developer Options → Take Bug Report
+    3. Or: adb bugreport
+    """
+
+    @staticmethod
+    def can_parse(file_path: str, first_lines: str) -> bool:
+        # Generic parser is the fallback — always returns True
+        return True
+
+    @staticmethod
+    def parse(file_path: str, stats: BatteryStats):
+        stats.parser_brand = "Generic Android"
+        stats.device.brand = "Android"
+
+        with open(file_path, "r", errors="replace") as f:
+            for line in f:
+                ls = line.strip()
+                GenericParser._parse_standard(ls, stats)
+                GenericParser._parse_dumpsys(ls, stats)
+                GenericParser._parse_kernel(ls, stats)
+
+    @staticmethod
+    def _parse_standard(ls, stats):
+        # Device info
+        m = re.search(r'Build fingerprint:\s*[\'"]?(.+?)[\'"]?\s*$', ls)
+        if m:
+            fp = m.group(1)
+            parts = fp.split("/")
+            if len(parts) >= 2:
+                stats.device.model_code = parts[1]
+            m2 = re.search(r":(\d+)/", fp)
+            if m2:
+                stats.device.android_version = m2.group(1)
+
+        m = re.search(r"Build:\s*(.+)", ls)
+        if m:
+            stats.device.build = m.group(1).strip()
+
+        m = re.search(r"Network:\s*(.+)", ls)
+        if m:
+            stats.device.network = m.group(1).strip()
+
+    @staticmethod
+    def _parse_dumpsys(ls, stats):
+        m = re.search(r"level:\s*(\d+)", ls)
+        if m:
+            stats.battery_level = int(m.group(1))
+
+        m = re.search(r"health:\s*(\d+)", ls)
+        if m and not stats.health.health_status:
+            health_val = int(m.group(1))
+            health_map = {
+                2: "Good",
+                3: "Overheat",
+                4: "Dead",
+                5: "Over Voltage",
+                6: "Failure",
+                7: "Cold",
+            }
+            stats.health.health_status = health_map.get(
+                health_val, f"Code {health_val}"
+            )
+
+        m = re.search(r"temperature:\s*(\d+)", ls)
+        if m and stats.health.max_temp_c is None:
+            stats.health.max_temp_c = int(m.group(1)) / 10.0
+
+        m = re.search(r"voltage:\s*(\d+)", ls)
+        if m and stats.health.current_voltage_mv is None:
+            stats.health.current_voltage_mv = int(m.group(1))
+
+        m = re.search(r"technology:\s*(.+)", ls)
+        if m:
+            stats.health.technology = m.group(1).strip()
+
+        # Battery capacity from dumpsys
+        m = re.search(r"Estimated battery capacity:\s*(\d+)", ls)
+        if m and stats.health.design_capacity_mah is None:
+            stats.health.design_capacity_mah = int(m.group(1))
+
+        m = re.search(r"Min learned battery capacity:\s*(\d+)", ls)
+        if m and stats.health.full_charge_capacity_mah is None:
+            stats.health.full_charge_capacity_mah = int(m.group(1))
+
+        m = re.search(r"Max learned battery capacity:\s*(\d+)", ls)
+        if m and stats.health.full_charge_capacity_mah is None:
+            stats.health.full_charge_capacity_mah = int(m.group(1))
+
+        # Cycle count from batterystats
+        m = re.search(r"Estimated battery cycle count:\s*(\d+)", ls)
+        if m and stats.health.cycle_count is None:
+            stats.health.cycle_count = int(m.group(1))
+
+    @staticmethod
+    def _parse_kernel(ls, stats):
+        # /sys/class/power_supply/battery/ data
+        GenericParser._parse_sysfs(ls, stats)
+
+    @staticmethod
+    def _parse_sysfs(ls, stats):
+        for pattern, attr in [
+            (r"POWER_SUPPLY_CYCLE_COUNT=(\d+)", "cycle_count"),
+            (r"POWER_SUPPLY_CHARGE_FULL=(\d+)", "charge_full"),
+            (r"POWER_SUPPLY_CHARGE_FULL_DESIGN=(\d+)", "charge_full_design"),
+            (r"POWER_SUPPLY_TEMP=(\d+)", "temp"),
+            (r"POWER_SUPPLY_VOLTAGE_NOW=(\d+)", "voltage"),
+        ]:
+            m = re.search(pattern, ls)
+            if m:
+                val = int(m.group(1))
+                if attr == "cycle_count" and stats.health.cycle_count is None:
+                    stats.health.cycle_count = val
+                elif (
+                    attr == "charge_full"
+                    and stats.health.full_charge_capacity_mah is None
+                ):
+                    stats.health.full_charge_capacity_mah = val // 1000
+                elif (
+                    attr == "charge_full_design"
+                    and stats.health.design_capacity_mah is None
+                ):
+                    stats.health.design_capacity_mah = val // 1000
+                elif attr == "temp" and stats.health.max_temp_c is None:
+                    stats.health.max_temp_c = val / 10.0
+                elif attr == "voltage" and stats.health.current_voltage_mv is None:
+                    stats.health.current_voltage_mv = val // 1000
 
 
-def parse_build_date(line: str, stats: BatteryStats):
-    m = re.search(r"\[ro\.build\.date\]:\s*\[(.+?)\]", line)
-    if m:
-        stats.device.build_date = m.group(1)
+# ─── Parser Registry ────────────────────────────────────────────────────────
 
-    m = re.search(r"\[ro\.product\.model\]:\s*\[(.+?)\]", line)
-    if m:
-        stats.device.model = f"Samsung ({m.group(1)})"
-
-    m = re.search(r"\[ro\.soc\.manufacturer\]:\s*\[(.+?)\]", line)
-    if m:
-        stats.device.soc = m.group(1)
+PARSERS = [
+    ("samsung", SamsungParser),
+    ("realme", RealmeParser),
+    ("xiaomi", XiaomiParser),
+    ("generic", GenericParser),
+]
 
 
-def parse_charge_session(line: str, stats: BatteryStats):
-    """Parse DC.BatteryUsage section for charge session data."""
-    if "DC.BatteryUsage" not in line:
-        return
-
-    m = re.search(r"Last charge time:\s*(.+)", line)
-    if m:
-        stats.charge_session.last_charge_time = m.group(1).strip()
-
-    m = re.search(r"TotalDischarge\(%\):\s*([\d.]+)", line)
-    if m:
-        stats.charge_session.total_discharge_percent = float(m.group(1))
-
-    m = re.search(r"TotalUsage\(mAh\):\s*([\d,]+)", line)
-    if m:
-        stats.charge_session.total_usage_mah = float(m.group(1).replace(",", ""))
-
-    m = re.search(r"Screen on time:\s*(.+)", line)
-    if m:
-        stats.charge_session.screen_on_time = m.group(1).strip()
-
-    m = re.search(r"Screen off time:\s*(.+)", line)
-    if m:
-        stats.charge_session.screen_off_time = m.group(1).strip()
-
-    # Parse app usage lines
-    m = re.search(
-        r"(\d+)\s*\|\s*(\d+ [hm]\s*(?:\d+ [sm])?)\s*\|\s*([\d hms]+)\s*\|\s*([\d,.]+)\s*\|\s*([\d.]+)\s*\|\s*(\S+)",
-        line,
-    )
-    if m:
-        app = AppUsage(
-            uid=m.group(1),
-            active_time=m.group(2).strip(),
-            background_time=m.group(3).strip(),
-            usage_mah=float(m.group(4).replace(",", "")),
-            usage_percent=float(m.group(5)),
-            package=m.group(6),
-        )
-        stats.charge_session.apps.append(app)
+def detect_brand(file_path: str) -> str:
+    """Auto-detect the brand from file content."""
+    try:
+        with open(file_path, "r", errors="replace") as f:
+            first_chunk = ""
+            for i, line in enumerate(f):
+                first_chunk += line
+                if i > 50:
+                    break
+            for name, parser in PARSERS:
+                if name != "generic" and parser.can_parse(file_path, first_chunk):
+                    return name
+    except Exception:
+        pass
+    return "generic"
 
 
-def parse_screen_manufacture(line: str, stats: BatteryStats):
-    m = re.search(r"manufactureDate=ManufactureDate\{week=(\d+),\s*year=(\d+)\}", line)
-    if m:
-        week = int(m.group(1))
-        year = int(m.group(2))
-        # Approximate date from week number
-        try:
-            dt = datetime.strptime(f"{year}-W{week}-1", "%Y-W%W-%w")
-            stats.device.screen_manufacture_date = dt.strftime("%B %Y (Week %d)" % week)
-        except ValueError:
-            stats.device.screen_manufacture_date = f"Week {week}, {year}"
+def get_parser(brand: str):
+    """Get parser by brand name."""
+    for name, parser in PARSERS:
+        if name == brand:
+            return parser
+    return GenericParser
 
 
-def parse_file(file_path: str) -> BatteryStats:
+def parse_file(file_path: str, brand: str = "auto") -> BatteryStats:
+    """Parse a file and return battery stats."""
     stats = BatteryStats()
     stats.file_name = os.path.basename(file_path)
     stats.file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-    in_battery_dump = False
-    in_dc_usage = False
-    line_count = 0
+    # Handle zip files (bugreport zips)
+    if file_path.endswith(".zip"):
+        file_path = _extract_from_zip(file_path)
+        if not file_path:
+            return stats
 
-    with open(file_path, "r", errors="replace") as f:
-        for line in f:
-            line_count += 1
-            line_stripped = line.strip()
+    # Detect brand if auto
+    if brand == "auto":
+        brand = detect_brand(file_path)
 
-            # Device info (first ~20 lines)
-            if line_count <= 20:
-                parse_device_info(line_stripped, stats)
+    parser = get_parser(brand)
+    parser.parse(file_path, stats)
 
-            # Build date and properties
-            if line_count > 400000:
-                parse_build_date(line_stripped, stats)
-
-            # Track battery dump section
-            if "DUMP OF SERVICE battery:" in line_stripped:
-                in_battery_dump = True
-            elif in_battery_dump and line_stripped.startswith("DUMP OF SERVICE "):
-                in_battery_dump = False
-
-            if in_battery_dump:
-                parse_saved_battery(line_stripped, stats)
-
-            # DC.BatteryUsage section
-            if "DC.BatteryUsage" in line_stripped:
-                in_dc_usage = True
-                parse_charge_session(line_stripped, stats)
-            elif (
-                in_dc_usage
-                and line_stripped.strip()
-                and "DC.BatteryUsage" not in line_stripped
-            ):
-                if line_stripped.startswith("    ") or line_stripped.startswith("\t"):
-                    parse_charge_session(line_stripped, stats)
-                else:
-                    in_dc_usage = False
-
-            # Kernel-level battery data
-            if "sec_bat_get_battery_info:" in line_stripped:
-                parse_kernel_battery_info(line_stripped, stats)
-            elif "sec_bat_monitor_work:" in line_stripped:
-                parse_monitor_work(line_stripped, stats)
-            elif "capacity_max" in line_stripped or "CAP_NOM" in line_stripped:
-                parse_capacity_info(line_stripped, stats)
-
-            # EFS buffer
-            if "healthd: efs_buf:" in line_stripped:
-                parse_efs_buf(line_stripped, stats)
-
-            # Screen manufacture date
-            if "manufactureDate=" in line_stripped and "DisplayDevice" in line_stripped:
-                parse_screen_manufacture(line_stripped, stats)
-
-            # System-level battery info
-            parse_battery_level(line_stripped, stats)
-
-    # Derive model name from build
-    if stats.device.build:
-        build = stats.device.build
-        if "S921" in build:
-            stats.device.model = "Samsung Galaxy S24"
-        elif "S926" in build:
-            stats.device.model = "Samsung Galaxy S25"
-        elif "S928" in build:
-            stats.device.model = "Samsung Galaxy S25 Ultra"
-        elif "S923" in build:
-            stats.device.model = "Samsung Galaxy S25+"
-        elif "A315" in build or "A31" in build:
-            stats.device.model = "Samsung Galaxy A31"
-        elif "A54" in build:
-            stats.device.model = "Samsung Galaxy A54"
-        elif "A55" in build:
-            stats.device.model = "Samsung Galaxy A55"
-        elif "A15" in build:
-            stats.device.model = "Samsung Galaxy A15"
-        else:
-            stats.device.model = f"Samsung ({stats.device.model_code})"
+    # Derive model from build if not set
+    if stats.device.model == "Unknown" and stats.device.build:
+        _derive_model(stats)
 
     return stats
 
 
-def calculate_battery_metrics(stats: BatteryStats) -> dict:
-    metrics = {}
+def _extract_from_zip(zip_path: str) -> Optional[str]:
+    """Extract bugreport text from a zip file."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # Look for bugreport text files
+            for name in zf.namelist():
+                if "bugreport" in name.lower() and name.endswith(".txt"):
+                    # Extract to temp
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".txt", delete=False
+                    )
+                    with zf.open(name) as src:
+                        tmp.write(src.read().decode("utf-8", errors="replace"))
+                    tmp.close()
+                    return tmp.name
+                elif "bugreport" in name.lower() and name.endswith(".log"):
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".log", delete=False
+                    )
+                    with zf.open(name) as src:
+                        tmp.write(src.read().decode("utf-8", errors="replace"))
+                    tmp.close()
+                    return tmp.name
+            # Fallback: try any large text file
+            for name in zf.namelist():
+                if (
+                    name.endswith((".txt", ".log"))
+                    and zf.getinfo(name).file_size > 100000
+                ):
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".txt", delete=False
+                    )
+                    with zf.open(name) as src:
+                        tmp.write(src.read().decode("utf-8", errors="replace"))
+                    tmp.close()
+                    return tmp.name
+    except Exception as e:
+        print(f"⚠️  Error extracting zip: {e}")
+    return None
 
-    # Cycle count
-    if stats.health.usage_cycles_raw is not None:
-        metrics["cycle_count"] = stats.health.usage_cycles_raw / 100.0
-    elif stats.health.kernel_cycles is not None:
-        metrics["cycle_count"] = float(stats.health.kernel_cycles)
-    elif stats.health.efs_cycles is not None:
-        metrics["cycle_count"] = float(stats.health.efs_cycles)
 
-    # ASOC
+def _derive_model(stats: BatteryStats):
+    build = stats.device.build
+    if "S921" in build:
+        stats.device.model = "Samsung Galaxy S24"
+    elif "S926" in build:
+        stats.device.model = "Samsung Galaxy S25"
+    elif "S928" in build:
+        stats.device.model = "Samsung Galaxy S25 Ultra"
+    elif "A315" in build:
+        stats.device.model = "Samsung Galaxy A31"
+    elif "A54" in build:
+        stats.device.model = "Samsung Galaxy A54"
+    elif "A55" in build:
+        stats.device.model = "Samsung Galaxy A55"
+    elif "A34" in build:
+        stats.device.model = "Samsung Galaxy A34"
+    elif "A15" in build:
+        stats.device.model = "Samsung Galaxy A15"
+    elif "A25" in build:
+        stats.device.model = "Samsung Galaxy A25"
+    elif "Pixel" in build or "google" in build.lower():
+        stats.device.model = f"Google ({stats.device.model_code})"
+    else:
+        stats.device.model = f"{stats.device.brand} ({stats.device.model_code})"
+
+
+# ─── Metrics Calculator ─────────────────────────────────────────────────────
+
+
+def calculate_metrics(stats: BatteryStats) -> dict:
+    m = {}
+
+    if stats.health.cycle_count is not None:
+        m["cycle_count"] = float(stats.health.cycle_count)
     if stats.health.asoc is not None:
-        metrics["asoc_percent"] = stats.health.asoc
-    elif stats.health.efs_asoc is not None:
-        metrics["asoc_percent"] = stats.health.efs_asoc
-
-    # BSOH
+        m["asoc_percent"] = stats.health.asoc
+    elif stats.health.full_charge_capacity_mah and stats.health.design_capacity_mah:
+        m["asoc_percent"] = round(
+            stats.health.full_charge_capacity_mah
+            / stats.health.design_capacity_mah
+            * 100
+        )
     if stats.health.bsoh is not None:
-        metrics["bsoh_percent"] = stats.health.bsoh
-
-    # Max temp
-    if stats.health.max_temp is not None:
-        metrics["max_temp_c"] = stats.health.max_temp
-    elif stats.health.efs_max_temp is not None:
-        metrics["max_temp_c"] = stats.health.efs_max_temp
-
-    # Max current
-    if stats.health.max_current is not None:
-        metrics["max_current_ma"] = stats.health.max_current
-
-    # Temperature from snapshots
-    if stats.snapshots:
-        temps = [s.temp_tenths for s in stats.snapshots if s.temp_tenths]
-        if temps:
-            metrics["avg_temp_c"] = round(sum(temps) / len(temps) / 10.0, 1)
-            metrics["min_temp_c"] = min(temps) / 10.0
-            metrics["max_snapshot_temp_c"] = max(temps) / 10.0
-
-        voltages = [s.voltage_mv for s in stats.snapshots if s.voltage_mv]
-        if voltages:
-            metrics["avg_voltage_mv"] = round(sum(voltages) / len(voltages))
-            metrics["min_voltage_mv"] = min(voltages)
-            metrics["max_voltage_mv"] = max(voltages)
-
-        currents = [s.current_ma for s in stats.snapshots if s.current_ma is not None]
-        if currents:
-            metrics["avg_current_ma"] = round(sum(currents) / len(currents))
-            metrics["max_discharge_ma"] = min(currents)
-            metrics["max_charge_ma"] = max(currents)
-
-        metrics["snapshot_count"] = len(stats.snapshots)
-
-    # Design capacity
+        m["bsoh_percent"] = stats.health.bsoh
+    if stats.health.max_temp_c is not None:
+        m["max_temp_c"] = stats.health.max_temp_c
+    if stats.health.max_current_ma is not None:
+        m["max_current_ma"] = stats.health.max_current_ma
     if stats.health.design_capacity_mah:
-        metrics["design_capacity_mah"] = stats.health.design_capacity_mah
-    elif stats.health.efs_design_cap:
-        metrics["design_capacity_mah"] = stats.health.efs_design_cap
-    elif "A31" in stats.device.model:
-        metrics["design_capacity_mah"] = 5000
-    elif "S24" in stats.device.model:
-        metrics["design_capacity_mah"] = 4000
-
-    # Effective capacity
-    if "asoc_percent" in metrics and "design_capacity_mah" in metrics:
-        metrics["effective_capacity_mah"] = round(
-            metrics["design_capacity_mah"] * metrics["asoc_percent"] / 100.0
+        m["design_capacity_mah"] = stats.health.design_capacity_mah
+    if stats.health.full_charge_capacity_mah:
+        m["effective_capacity_mah"] = stats.health.full_charge_capacity_mah
+    elif "asoc_percent" in m and "design_capacity_mah" in m:
+        m["effective_capacity_mah"] = round(
+            m["design_capacity_mah"] * m["asoc_percent"] / 100
         )
 
+    # Snapshots
+    if stats.snapshots:
+        temps = [s.temp_c for s in stats.snapshots if s.temp_c]
+        if temps:
+            m["avg_temp_c"] = round(sum(temps) / len(temps), 1)
+            m["min_temp_c"] = min(temps)
+            m["max_snapshot_temp_c"] = max(temps)
+        voltages = [s.voltage_mv for s in stats.snapshots if s.voltage_mv]
+        if voltages:
+            m["avg_voltage_mv"] = round(sum(voltages) / len(voltages))
+        currents = [s.current_ma for s in stats.snapshots if s.current_ma is not None]
+        if currents:
+            m["avg_current_ma"] = round(sum(currents) / len(currents))
+            m["max_discharge_ma"] = min(currents)
+            m["max_charge_ma"] = max(currents)
+        m["snapshot_count"] = len(stats.snapshots)
+
     # Health grade
-    if "asoc_percent" in metrics:
-        health = metrics["asoc_percent"]
-        if health >= 95:
-            metrics["health_grade"] = "Excellent"
-            metrics["health_emoji"] = "🟢"
-        elif health >= 85:
-            metrics["health_grade"] = "Good"
-            metrics["health_emoji"] = "🟡"
-        elif health >= 70:
-            metrics["health_grade"] = "Fair"
-            metrics["health_emoji"] = "🟠"
+    asoc = m.get("asoc_percent")
+    if asoc is not None:
+        if asoc >= 95:
+            m["health_grade"], m["health_emoji"] = "Excellent", "🟢"
+        elif asoc >= 85:
+            m["health_grade"], m["health_emoji"] = "Good", "🟡"
+        elif asoc >= 70:
+            m["health_grade"], m["health_emoji"] = "Fair", "🟠"
         else:
-            metrics["health_grade"] = "Poor"
-            metrics["health_emoji"] = "🔴"
+            m["health_grade"], m["health_emoji"] = "Poor", "🔴"
 
-    # Cycle-based predictions
-    if "cycle_count" in metrics and "asoc_percent" in metrics:
-        cycles = metrics["cycle_count"]
-        health = metrics["asoc_percent"]
+    # Predictions
+    cycles = m.get("cycle_count", 0)
+    health = m.get("asoc_percent", 100)
+    if cycles > 0 and health < 100:
+        deg_per_cycle = (100 - health) / cycles
+        m["degradation_per_cycle"] = round(deg_per_cycle, 4)
+        if health > 80:
+            cycles_to_80 = (health - 80) / deg_per_cycle
+            m["cycles_to_80"] = int(cycles_to_80)
+            days_used = cycles / 0.92
+            m["est_days_used"] = int(days_used)
+            m["est_years_used"] = round(days_used / 365, 1)
+            remaining_days = cycles_to_80 / 0.92
+            m["est_remaining_days"] = int(remaining_days)
+            m["est_remaining_months"] = int(remaining_days / 30)
 
-        expected_health = max(100 - (cycles / 500) * 20, 60)
-        metrics["expected_health_at_cycles"] = round(expected_health, 1)
-        metrics["health_vs_expected"] = round(health - expected_health, 1)
+    # Max temp warning
+    max_t = m.get("max_temp_c", 0)
+    if max_t > 70:
+        m["temp_warning"] = "🔴 CRITICAL: >70°C — battery damage likely"
+    elif max_t > 60:
+        m["temp_warning"] = "🟠 WARNING: >60°C — avoid charging while gaming"
+    elif max_t > 45:
+        m["temp_warning"] = "🟡 NOTICE: >45°C — normal for heavy use"
 
-        # Degradation per cycle
-        if cycles > 0:
-            degradation_per_cycle = (100 - health) / cycles
-            metrics["degradation_per_cycle"] = round(degradation_per_cycle, 4)
+    return m
 
-            # Cycles to 80%
-            if health > 80:
-                remaining = health - 80
-                cycles_to_80 = remaining / degradation_per_cycle
-                metrics["cycles_to_80"] = int(cycles_to_80)
 
-                # Time estimates (assuming 0.92 cycles/day)
-                days_used = cycles / 0.92
-                metrics["est_days_used"] = int(days_used)
-                metrics["est_years_used"] = round(days_used / 365, 1)
-
-                remaining_days = cycles_to_80 / 0.92
-                metrics["est_remaining_days"] = int(remaining_days)
-                metrics["est_remaining_months"] = int(remaining_days / 30)
-
-    return metrics
+# ─── Report Formatters ──────────────────────────────────────────────────────
 
 
 def format_report(stats: BatteryStats, metrics: dict) -> str:
@@ -514,19 +1045,26 @@ def format_report(stats: BatteryStats, metrics: dict) -> str:
     h = stats.health
 
     lines.append("=" * 60)
-    lines.append(f"  🔋 BATTERY HEALTH REPORT")
+    lines.append("  🔋 BATTERY HEALTH REPORT")
     lines.append("=" * 60)
     lines.append("")
+    lines.append(f"  Brand:         {d.brand}")
     lines.append(f"  Device:        {d.model}")
-    lines.append(f"  Model Code:    {d.model_code}")
-    lines.append(f"  Android:       {d.android_version}")
-    lines.append(f"  Build:         {d.build}")
+    if d.model_code:
+        lines.append(f"  Model Code:    {d.model_code}")
+    if d.android_version:
+        lines.append(f"  Android:       {d.android_version}")
+    if d.build:
+        lines.append(f"  Build:         {d.build}")
     if d.build_date:
         lines.append(f"  Build Date:    {d.build_date}")
-    lines.append(f"  SoC:           {d.soc}")
-    lines.append(f"  Network:       {d.network}")
+    if d.network:
+        lines.append(f"  Network:       {d.network}")
+    if d.first_use_date:
+        lines.append(f"  First Use:     {d.first_use_date}")
     if d.screen_manufacture_date:
         lines.append(f"  Screen Made:   {d.screen_manufacture_date}")
+    lines.append(f"  Parser:        {stats.parser_brand}")
     lines.append(f"  Log File:      {stats.file_name} ({stats.file_size_mb:.1f} MB)")
     lines.append("")
 
@@ -542,222 +1080,112 @@ def format_report(stats: BatteryStats, metrics: dict) -> str:
         lines.append(f"  ASOC:              {metrics['asoc_percent']}%")
     if "bsoh_percent" in metrics:
         lines.append(f"  BSOH:              {metrics['bsoh_percent']}%")
+    if h.health_status:
+        lines.append(f"  Health Status:     {h.health_status}")
     if "cycle_count" in metrics:
         lines.append(f"  Cycle Count:       {metrics['cycle_count']:.0f}")
     if "design_capacity_mah" in metrics:
         lines.append(f"  Design Capacity:   {metrics['design_capacity_mah']} mAh")
     if "effective_capacity_mah" in metrics:
         lines.append(f"  Effective Cap:     {metrics['effective_capacity_mah']} mAh")
+    if h.technology:
+        lines.append(f"  Technology:        {h.technology}")
+    if h.charge_status:
+        lines.append(f"  Charge Status:     {h.charge_status}")
     if "max_temp_c" in metrics:
-        temp_warn = " ⚠️" if metrics["max_temp_c"] > 60 else ""
-        lines.append(f"  Max Temp:          {metrics['max_temp_c']}°C{temp_warn}")
+        warn = " ⚠️" if metrics["max_temp_c"] > 60 else ""
+        lines.append(f"  Max Temp:          {metrics['max_temp_c']}°C{warn}")
     if "max_current_ma" in metrics:
         lines.append(f"  Max Current:       {metrics['max_current_ma']} mA")
-
     if stats.battery_level is not None:
         lines.append(f"  Current Level:     {stats.battery_level}%")
-    if stats.battery_saver_on is not None:
-        lines.append(
-            f"  Battery Saver:     {'ON' if stats.battery_saver_on else 'OFF'}"
-        )
 
-    # EFS data
-    if h.efs_asoc is not None or h.efs_cycles is not None:
+    if stats.snapshots:
         lines.append("")
-        lines.append("  📦 EFS Buffer (Raw)")
-        if h.efs_asoc is not None:
-            lines.append(f"    ASOC:            {h.efs_asoc}%")
-        if h.efs_cycles is not None:
-            lines.append(f"    Cycles:          {h.efs_cycles}")
-        if h.efs_design_cap is not None:
-            lines.append(f"    Design Cap:      {h.efs_design_cap} mAh")
-        if h.efs_full_charge_cap is not None:
-            lines.append(f"    Full Charge Cap: {h.efs_full_charge_cap} mAh")
-        if h.efs_max_temp is not None:
-            lines.append(f"    Max Temp:        {h.efs_max_temp}°C")
+        lines.append("-" * 60)
+        lines.append("  ⚡ SNAPSHOT DATA")
+        lines.append("-" * 60)
+        if "snapshot_count" in metrics:
+            lines.append(f"  Snapshots:      {metrics['snapshot_count']}")
+        if "avg_voltage_mv" in metrics:
+            lines.append(f"  Avg Voltage:    {metrics['avg_voltage_mv']} mV")
+        if "avg_current_ma" in metrics:
+            lines.append(f"  Avg Current:    {metrics['avg_current_ma']} mA")
+        if "avg_temp_c" in metrics:
+            lines.append(f"  Avg Temp:       {metrics['avg_temp_c']}°C")
 
-    lines.append("")
-    lines.append("-" * 60)
-    lines.append("  ⚡ LIVE SNAPSHOT DATA")
-    lines.append("-" * 60)
-
-    if "snapshot_count" in metrics:
-        lines.append(f"  Snapshots:         {metrics['snapshot_count']}")
-    if "avg_voltage_mv" in metrics:
-        lines.append(f"  Avg Voltage:       {metrics['avg_voltage_mv']} mV")
-        lines.append(
-            f"  Voltage Range:     {metrics['min_voltage_mv']} - {metrics['max_voltage_mv']} mV"
-        )
-    if "avg_current_ma" in metrics:
-        lines.append(f"  Avg Current:       {metrics['avg_current_ma']} mA")
-    if "max_discharge_ma" in metrics:
-        lines.append(f"  Max Discharge:     {metrics['max_discharge_ma']} mA")
-    if "max_charge_ma" in metrics:
-        lines.append(f"  Max Charge:        {metrics['max_charge_ma']} mA")
-    if "avg_temp_c" in metrics:
-        lines.append(f"  Avg Temp:          {metrics['avg_temp_c']}°C")
-        lines.append(
-            f"  Temp Range:        {metrics['min_temp_c']}°C - {metrics['max_snapshot_temp_c']}°C"
-        )
-
-    # Charge session
+    # Apps
     cs = stats.charge_session
-    if cs.last_charge_time:
-        lines.append("")
-        lines.append("-" * 60)
-        lines.append("  🔌 LAST CHARGE SESSION")
-        lines.append("-" * 60)
-        lines.append(f"  Last Charge:       {cs.last_charge_time}")
-        lines.append(f"  Total Discharge:   {cs.total_discharge_percent}%")
-        lines.append(f"  Total Usage:       {cs.total_usage_mah:.0f} mAh")
-        lines.append(f"  Screen On:         {cs.screen_on_time}")
-        lines.append(f"  Screen Off:        {cs.screen_off_time}")
-
-    # App usage
     if cs.apps:
         lines.append("")
         lines.append("-" * 60)
         lines.append("  📱 TOP BATTERY DRAINERS")
         lines.append("-" * 60)
-        lines.append(f"  {'Rank':<5} {'App':<45} {'mAh':>8} {'%':>6}")
-        lines.append("  " + "-" * 64)
+        lines.append(f"  {'Rank':<5} {'App':<40} {'mAh':>8} {'%':>6}")
+        lines.append("  " + "-" * 59)
         for i, app in enumerate(cs.apps[:15], 1):
             pkg = app.package.split(".")[-1] if "." in app.package else app.package
-            # Friendly names
-            name_map = {
-                "steam": "Steam",
-                "whatsapp": "WhatsApp",
-                "duolingo": "Duolingo",
-                "chrome": "Chrome",
-                "youtube": "YouTube",
-                "instagram": "Instagram",
-                "telegram": "Telegram",
-                "flowerfree": "Smart Launcher",
-                "launcher": "Samsung Launcher",
-                "vending": "Play Store",
-                "googlequicksearchbox": "Google App",
-                "gmail": "Gmail",
-                "gm": "Gmail",
-                "gallery3d": "Gallery",
-                "camera": "Camera",
-                "dialer": "Dialer",
-                "systemui": "System UI",
-                "honeyboard": "Samsung Keyboard",
-                "goodlock": "Good Lock",
-                "chatgpt": "ChatGPT",
-                "leagueconnect": "LoL Mobile",
-                "mShop": "Amazon",
-                "samsungapps": "Samsung Apps",
-                "easyMover": "Easy Share",
-                "photoretouching": "Photo Editor",
-                "smartsuggestions": "Smart Suggestions",
-                "oneconnect": "SmartThings",
-            }
-            friendly = name_map.get(pkg, pkg)
             lines.append(
-                f"  {i:<5} {friendly:<45} {app.usage_mah:>7.1f} {app.usage_percent:>5.1f}%"
+                f"  {i:<5} {pkg:<40} {app.usage_mah:>7.1f} {app.usage_percent:>5.1f}%"
             )
 
+    # Predictions
     lines.append("")
     lines.append("-" * 60)
     lines.append("  🔮 PREDICTIONS & INSIGHTS")
     lines.append("-" * 60)
 
-    if "cycle_count" in metrics and "asoc_percent" in metrics:
-        if "cycles_to_80" in metrics:
-            lines.append(f"  Cycles to 80%:     ~{metrics['cycles_to_80']} more cycles")
-        if "est_days_used" in metrics:
-            lines.append(
-                f"  Est. Days Used:    ~{metrics['est_days_used']} days ({metrics['est_years_used']} years)"
-            )
-        if "est_remaining_months" in metrics:
-            lines.append(
-                f"  Est. Remaining:    ~{metrics['est_remaining_months']} months"
-            )
-        if "health_vs_expected" in metrics:
-            diff = metrics["health_vs_expected"]
-            if diff > 0:
-                lines.append(f"  vs Expected:       +{diff}% (better than avg)")
-            elif diff < 0:
-                lines.append(f"  vs Expected:       {diff}% (worse than avg)")
-        if "degradation_per_cycle" in metrics:
-            lines.append(
-                f"  Degradation/Cycle: {metrics['degradation_per_cycle'] * 100:.3f}%"
-            )
-
-        lines.append("")
-        lines.append("  💡 Insights:")
-        health = metrics["asoc_percent"]
-        cycles = metrics["cycle_count"]
-        max_temp = metrics.get("max_temp_c", 0)
-
-        if health >= 90 and cycles > 1000:
-            lines.append("  • 🏆 Warrior battery! 90%+ after 1000+ cycles")
-        if max_temp > 70:
-            lines.append(
-                "  • 🔴 CRITICAL: Max temp exceeded 70°C — battery damage likely"
-            )
-        elif max_temp > 60:
-            lines.append(
-                "  • 🟠 WARNING: Max temp exceeded 60°C — avoid charging while gaming"
-            )
-        elif max_temp > 45:
-            lines.append("  • 🟡 NOTICE: Max temp was warm — normal for heavy use")
-        if health < 80:
-            lines.append("  • 🔴 Battery below 80% — consider replacement")
-        elif health < 85:
-            lines.append("  • 🟡 Battery aging — monitor closely")
-        if cycles > 500:
-            lines.append(
-                "  • High cycle count — battery chemistry is worn but holding up"
-            )
-        if health >= 90:
-            lines.append("  • Battery is in great shape 👍")
+    if "cycles_to_80" in metrics:
+        lines.append(f"  Cycles to 80%:     ~{metrics['cycles_to_80']}")
+    if "est_days_used" in metrics:
+        lines.append(
+            f"  Est. Days Used:    ~{metrics['est_days_used']} ({metrics['est_years_used']} years)"
+        )
+    if "est_remaining_months" in metrics:
+        lines.append(f"  Est. Remaining:    ~{metrics['est_remaining_months']} months")
+    if "degradation_per_cycle" in metrics:
+        lines.append(
+            f"  Degradation/Cycle: {metrics['degradation_per_cycle'] * 100:.3f}%"
+        )
+    if "temp_warning" in metrics:
+        lines.append(f"\n  {metrics['temp_warning']}")
 
     lines.append("")
     lines.append("=" * 60)
     return "\n".join(lines)
 
 
-def format_comparison_report(all_stats: list, all_metrics: list) -> str:
-    lines = []
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("  📱 DEVICE COMPARISON")
-    lines.append("=" * 70)
-    lines.append("")
-
-    header = f"  {'Metric':<25}"
-    for stats in all_stats:
-        header += f" {stats.device.model:>20}"
+def format_comparison(all_stats, all_metrics):
+    lines = ["", "=" * 70, "  📱 DEVICE COMPARISON", "=" * 70, ""]
+    header = f"  {'Metric':<22}"
+    for s in all_stats:
+        header += f" {s.device.model[:20]:>20}"
     lines.append(header)
-    lines.append("  " + "-" * (25 + 22 * len(all_stats)))
+    lines.append("  " + "-" * (22 + 22 * len(all_stats)))
 
-    rows = [
-        ("ASOC", lambda m: f"{m.get('asoc_percent', 'N/A')}%"),
-        ("BSOH", lambda m: f"{m.get('bsoh_percent', 'N/A')}%"),
-        ("Cycles", lambda m: f"{m.get('cycle_count', 'N/A')}"),
-        ("Max Temp", lambda m: f"{m.get('max_temp_c', 'N/A')}°C"),
-        ("Max Current", lambda m: f"{m.get('max_current_ma', 'N/A')} mA"),
-        ("Design Cap", lambda m: f"{m.get('design_capacity_mah', 'N/A')} mAh"),
-        ("Effective Cap", lambda m: f"{m.get('effective_capacity_mah', 'N/A')} mAh"),
+    for label, getter in [
+        ("Brand", lambda m, s: s.device.brand[:20]),
+        ("ASOC", lambda m, s: f"{m.get('asoc_percent', 'N/A')}%"),
+        ("Cycles", lambda m, s: f"{m.get('cycle_count', 'N/A')}"),
+        ("Max Temp", lambda m, s: f"{m.get('max_temp_c', 'N/A')}°C"),
+        ("Design Cap", lambda m, s: f"{m.get('design_capacity_mah', 'N/A')}"),
         (
-            "Health Grade",
-            lambda m: f"{m.get('health_emoji', '')} {m.get('health_grade', 'N/A')}",
+            "Health",
+            lambda m, s: f"{m.get('health_emoji', '')} {m.get('health_grade', 'N/A')}",
         ),
-        ("Deg/Cycle", lambda m: f"{m.get('degradation_per_cycle', 0) * 100:.3f}%"),
-        ("Est. Remaining", lambda m: f"{m.get('est_remaining_months', 'N/A')} mo"),
-    ]
-
-    for label, getter in rows:
-        row = f"  {label:<25}"
-        for metrics in all_metrics:
-            row += f" {str(getter(metrics)):>20}"
+        ("Remaining", lambda m, s: f"{m.get('est_remaining_months', 'N/A')} mo"),
+    ]:
+        row = f"  {label:<22}"
+        for metrics, stats in zip(all_metrics, all_stats):
+            row += f" {str(getter(metrics, stats)):>20}"
         lines.append(row)
 
     lines.append("")
     lines.append("=" * 70)
     return "\n".join(lines)
+
+
+# ─── Main ───────────────────────────────────────────────────────────────────
 
 
 def main():
@@ -768,19 +1196,23 @@ def main():
     files = []
     json_mode = False
     compare_mode = False
-    apps_mode = False
+    brand = "auto"
 
-    for arg in sys.argv[1:]:
-        if arg == "--json":
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--json":
             json_mode = True
-        elif arg == "--compare":
+        elif args[i] == "--compare":
             compare_mode = True
-        elif arg == "--apps":
-            apps_mode = True
-        elif os.path.exists(arg):
-            files.append(arg)
+        elif args[i] == "--brand" and i + 1 < len(args):
+            brand = args[i + 1].lower()
+            i += 1
+        elif os.path.exists(args[i]):
+            files.append(args[i])
         else:
-            print(f"⚠️  File not found: {arg}")
+            print(f"⚠️  File not found: {args[i]}")
+        i += 1
 
     if not files:
         print("❌ No valid files provided.")
@@ -789,43 +1221,42 @@ def main():
     all_stats = []
     all_metrics = []
 
-    for file_path in files:
+    for fp in files:
         if not json_mode:
-            print(f"🔍 Parsing: {os.path.basename(file_path)}...")
-        stats = parse_file(file_path)
-        metrics = calculate_battery_metrics(stats)
+            print(f"🔍 Parsing: {os.path.basename(fp)}...")
+        stats = parse_file(fp, brand)
+        metrics = calculate_metrics(stats)
         all_stats.append(stats)
         all_metrics.append(metrics)
-
         if not json_mode:
-            report = format_report(stats, metrics)
-            print(report)
+            print(format_report(stats, metrics))
 
     if json_mode:
         output = []
-        for stats, metrics in zip(all_stats, all_metrics):
+        for s, m in zip(all_stats, all_metrics):
             entry = {
-                "device": asdict(stats.device),
-                "health": asdict(stats.health),
-                "metrics": metrics,
-                "snapshot_count": len(stats.snapshots),
-                "file": stats.file_name,
-                "file_size_mb": round(stats.file_size_mb, 1),
+                "device": asdict(s.device),
+                "health": asdict(s.health),
+                "metrics": m,
+                "snapshot_count": len(s.snapshots),
+                "parser": s.parser_brand,
+                "file": s.file_name,
+                "file_size_mb": round(s.file_size_mb, 1),
             }
-            if stats.charge_session.apps:
+            if s.charge_session.apps:
                 entry["top_apps"] = [
                     {
                         "package": a.package,
                         "mah": a.usage_mah,
                         "percent": a.usage_percent,
                     }
-                    for a in stats.charge_session.apps[:10]
+                    for a in s.charge_session.apps[:10]
                 ]
             output.append(entry)
         print(json.dumps(output, indent=2))
 
     if compare_mode and len(all_stats) > 1:
-        print(format_comparison_report(all_stats, all_metrics))
+        print(format_comparison(all_stats, all_metrics))
 
 
 if __name__ == "__main__":

@@ -1,55 +1,109 @@
-# Samsung Battery Analyzer 🔋
+# Universal Android Battery Analyzer 🔋
 
-Parse Samsung dumpstate logs and extract battery health data. Works with `*#9900#` SysDump logs.
+Parse battery health data from **Samsung, Realme/Oppo/OnePlus, Xiaomi/Redmi/POCO**, and any Android bugreport. Works with dumpstate logs, bugreport zips, and kernel logs.
+
+## Supported Brands
+
+| Brand | Diagnostic Code | Data Source |
+|-------|----------------|-------------|
+| **Samsung** | `*#9900#` | SysDump → `dumpState_*.log` |
+| **Realme/Oppo** | `*#800#` | Logkit → bugreport |
+| **OnePlus** | `*#800#` | Logkit → bugreport |
+| **Xiaomi/Redmi** | `*#*#284#*#*` | Bugreport → `bugreport-*.zip` |
+| **POCO** | `*#*#284#*#*` | Bugreport → `bugreport-*.zip` |
+| **Google Pixel** | `*#*#284#*#*` | Bugreport → `bugreport-*.zip` |
+| **Any Android** | `adb bugreport` | Standard Android bugreport |
 
 ## What it extracts
 
-- **Battery ASOC** (Actual State of Charge) - the real health %
-- **BSOH** (Battery State of Health)
-- **Cycle count** - how many full charge cycles
-- **Max temp & current** ever recorded
-- **Live voltage/current/temp** snapshots from kernel logs
+- **ASOC** (Actual State of Charge) — real battery health %
+- **BSOH** (Battery State of Health) — overall condition
+- **Cycle count** — full charge cycles
+- **Design vs Effective capacity** — how much capacity is left
+- **Max temperature** — ever recorded (with danger warnings)
+- **App battery drain** — which apps use the most power
 - **Health grade** with color-coded emoji
-- **Predictions** - estimated remaining life, cycles to 80%
+- **Lifespan predictions** — estimated remaining life
 
 ## Usage
 
 ```bash
-# Single device report
+# Auto-detect brand
 python3 battery_analyzer.py dumpstate.txt
 
-# Compare two devices
+# Force brand parser
+python3 battery_analyzer.py bugreport.txt --brand xiaomi
+python3 battery_analyzer.py oplus_log.txt --brand realme
+
+# Compare two phones
 python3 battery_analyzer.py phone1.txt phone2.log --compare
 
-# JSON output (for piping/processing)
+# JSON output (for scripting/apps)
 python3 battery_analyzer.py dumpstate.txt --json
+
+# Parse bugreport zip
+python3 battery_analyzer.py bugreport-samsung-2026.zip
 ```
 
-## Supported files
+## How to get battery data
 
-Any Samsung dumpstate file from:
-- `*#9900#` → Run dumpstate → SD card
-- Samsung device diagnostic logs
-- Both `.txt` and `.log` extensions
+### Samsung
+1. Dial `*#9900#` → Run dumpstate → OK → Copy to SD card
+2. Find `dumpState_*.log` in `/sdcard/log/`
 
-## Tested on
+### Realme/Oppo/OnePlus
+1. Dial `*#800#` → Start Record → Use phone → Stop Record
+2. Find zip in `/sdcard/LogKit/`
+3. Or: `adb bugreport`
 
-- Samsung Galaxy A31 (Android 12, OneUI 3.x)
-- Samsung Galaxy S24 (Android 16, OneUI 8.x)
+### Xiaomi/Redmi/POCO
+1. Dial `*#*#284#*#*` for bug report
+2. Or: Settings → About Phone → tap MIUI version 7x → Developer Options → Take Bug Report
+3. Or: `adb bugreport`
 
-## How Samsung battery data works
+### Any Android
+1. Enable Developer Options (tap Build Number 7 times)
+2. Settings → Developer Options → Take Bug Report
+3. Or: `adb bugreport > bugreport.txt`
 
-| Field | Location | Meaning |
-|-------|----------|---------|
-| `mSavedBatteryAsoc` | DUMP OF SERVICE battery | Battery health % |
-| `mSavedBatteryUsage` | DUMP OF SERVICE battery | Cycle count (÷100) |
-| `mSavedBatteryMaxTemp` | DUMP OF SERVICE battery | Max temp ever (÷10 = °C) |
-| `mSavedBatteryMaxCurrent` | DUMP OF SERVICE battery | Max current draw (mA) |
-| `mSavedBatteryBsoh` | DUMP OF SERVICE battery | Battery SOH % |
-| `sec_bat_monitor_work` | Kernel log | Live cycle count |
-| `sec_bat_get_battery_info` | Kernel log | Voltage, current, SOC, temp |
+## What each field means
+
+| Field | Samsung Field | Standard Field | Meaning |
+|-------|--------------|----------------|---------|
+| ASOC | `mSavedBatteryAsoc` | `charge_full / charge_full_design * 100` | Battery health % |
+| Cycles | `mSavedBatteryUsage ÷ 100` | `POWER_SUPPLY_CYCLE_COUNT` | Full charge cycles |
+| Max Temp | `mSavedBatteryMaxTemp ÷ 10` | `POWER_SUPPLY_TEMP ÷ 10` | Hottest ever (°C) |
+| Design Cap | `efs_buf[3]` | `POWER_SUPPLY_CHARGE_FULL_DESIGN` | Original capacity |
+| Effective Cap | `efs_buf[4]` | `POWER_SUPPLY_CHARGE_FULL` | Current capacity |
+
+## Battery Health Grades
+
+| Grade | Emoji | ASOC Range | What it means |
+|-------|-------|------------|---------------|
+| Excellent | 🟢 | 95-100% | Like new |
+| Good | 🟡 | 85-94% | Normal wear |
+| Fair | 🟠 | 70-84% | Getting old |
+| Poor | 🔴 | <70% | Consider replacing |
+
+## Files
+
+```
+battery-analyzer/
+├── battery_analyzer.py          # Main tool (single file, no deps)
+├── README.md                    # This file
+├── .gitignore                   # Excludes large log files
+└── reports/                     # Sample analysis reports
+    ├── KP-A31-Battery-Report.md
+    └── Pujit-S24-Battery-Report.md
+```
+
+## Requirements
+
+- Python 3.6+
+- No external dependencies (pure stdlib)
 
 ## References
 
-- [MyBattery](https://github.com/Alyaqdhans/MyBattery) - Android app for Samsung battery health
-- [samsung-batterystats](https://github.com/dogpoopy/samsung-batterystats) - Battery stats viewer
+- [MyBattery](https://github.com/Alyaqdhans/MyBattery) — Samsung battery health app
+- [samsung-batterystats](https://github.com/dogpoopy/samsung-batterystats) — Samsung battery stats viewer
+- [AccuBattery](https://play.google.com/store/apps/details?id=com.digibites.accubattery) — Popular battery monitor (uses same sysfs data)
