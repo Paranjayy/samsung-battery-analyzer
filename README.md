@@ -1,6 +1,8 @@
-# Universal Android Battery Analyzer 🔋
+# Universal Battery Analyzer 🔋
 
-Parse battery health data from **Samsung, Realme/Oppo/OnePlus, Xiaomi/Redmi/POCO**, and any Android bugreport. Works with dumpstate logs, bugreport zips, and kernel logs.
+Parse battery health data from **Samsung, Realme/Oppo/OnePlus, Xiaomi/Redmi/POCO**, iPhone, iPad, and any Android bugreport. Works with dumpstate logs, bugreport zips, and kernel logs.
+
+> 📖 **[Full Device Guide](DEVICE_GUIDE.md)** — How to get battery data from ANY phone/tablet (Android + iOS)
 
 ## Supported Brands
 
@@ -104,6 +106,12 @@ battery-analyzer/
 
 ## References
 
+**Android:**
 - [MyBattery](https://github.com/Alyaqdhans/MyBattery) — Samsung battery health app
 - [samsung-batterystats](https://github.com/dogpoopy/samsung-batterystats) — Samsung battery stats viewer
-- [AccuBattery](https://play.google.com/store/apps/details?id=com.digibites.accubattery) — Popular battery monitor (uses same sysfs data)
+- [AccuBattery](https://play.google.com/store/apps/details?id=com.digibites.accubattery) — Popular battery monitor
+
+**iOS/iPad:**
+- [CoconutBattery](https://coconut-flavor.com/coconutbattery/) — Mac app for detailed battery analysis
+- [3uTools](https://www.3u.com/) — Windows tool for iPhone/iPad battery info
+- [PowerUtil Shortcut](https://www.icloud.com/shortcuts/) — Extract cycle count from analytics
