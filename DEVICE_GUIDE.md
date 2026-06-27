@@ -273,3 +273,80 @@ ANY PHONE:   adb bugreport > bugreport.txt
 ---
 
 *Last updated: June 27, 2026*
+
+---
+
+## 🔧 Narzo 10 / Realme (Specific Process)
+
+### What We Know
+- **Model:** Realme Narzo 10 (RMX2040)
+- **OS:** Realme UI (ColorOS based), Android 11
+- **Build:** RMX2040_11_C.14
+
+### How to Get Battery Health on Narzo 10
+
+#### Method 1: Settings (Easiest)
+1. Open **Settings** → **Battery**
+2. Look for **"Battery Health"** or **"Battery Information"**
+3. Shows: Maximum capacity % and cycle count (if available)
+4. Note: Realme UI may not show cycle count in all versions
+
+#### Method 2: Dial Code
+1. Open Phone app → Dial `*#800#`
+2. This opens **Logkit** (Realme's diagnostic tool)
+3. Tap **"Start Record"** → Use phone for 2-3 minutes
+4. Tap **"Stop Record"**
+5. Find zip in: `/sdcard/LogKit/`
+6. Share the zip file
+
+**Note:** The logkit captures system logs but may NOT include detailed battery health data (ASOC, cycle count). It mainly captures:
+- Battery voltage/current/temp over time
+- System logs
+- Network logs
+- Process info
+
+#### Method 3: ADB (Best for Full Data)
+```bash
+# Enable USB debugging:
+# Settings → Developer Options → USB Debugging → ON
+
+# Quick battery info:
+adb shell dumpsys battery
+
+# Full battery stats:
+adb shell dumpsys batterystats > narzo10_battery.txt
+
+# Kernel battery data:
+adb shell cat /sys/class/power_supply/battery/cycle_count
+adb shell cat /sys/class/power_supply/battery/charge_full
+adb shell cat /sys/class/power_supply/battery/charge_full_design
+adb shell cat /sys/class/power_supply/battery/temp
+adb shell cat /sys/class/power_supply/battery/voltage_now
+
+# Complete bugreport (recommended):
+adb bugreport > narzo10_bugreport.txt
+```
+
+#### Method 4: Third-Party Apps
+- **AccuBattery** (Play Store) — monitors battery health over time
+- **Battery Guru** (Play Store) — detailed battery stats
+- **CPU-Z** — shows some battery info
+
+### Narzo 10 Battery Specs
+- **Design Capacity:** 5,000 mAh
+- **Charging:** 18W Quick Charge
+- **Battery Type:** Li-Po (non-removable)
+- **Chipset:** MediaTek Helio G80
+
+### What the Logkit Captured
+From the extracted `com.coloros.zip`:
+- `dumpsys_batterystats.txt` — battery history (voltage, temp, charge level)
+- `batterystats_for_bh.txt` — battery health checkin data
+- `prop.txt` — system properties (model: RMX2040)
+- `kernel_log` — kernel-level battery events
+- `netlog/` — network activity logs
+
+**The logkit data shows:** Battery was at 83% level, 37°C temp, 4118mV voltage at time of capture. Health status: "good".
+
+### Recommendation for Full Battery Data
+**Use ADB method** — it's the most reliable way to get cycle count and health data from the Narzo 10. The logkit is more for debugging than battery health.
