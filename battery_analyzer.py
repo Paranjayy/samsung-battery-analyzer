@@ -1196,6 +1196,11 @@ def main():
     files = []
     json_mode = False
     compare_mode = False
+    csv_mode = False
+    chart_mode = False
+    score_mode = False
+    history_mode = False
+    adb_mode = False
     brand = "auto"
 
     args = sys.argv[1:]
@@ -1205,6 +1210,16 @@ def main():
             json_mode = True
         elif args[i] == "--compare":
             compare_mode = True
+        elif args[i] == "--csv":
+            csv_mode = True
+        elif args[i] == "--chart":
+            chart_mode = True
+        elif args[i] == "--score":
+            score_mode = True
+        elif args[i] == "--history":
+            history_mode = True
+        elif args[i] == "--adb":
+            adb_mode = True
         elif args[i] == "--brand" and i + 1 < len(args):
             brand = args[i + 1].lower()
             i += 1
@@ -1213,6 +1228,10 @@ def main():
         else:
             print(f"⚠️  File not found: {args[i]}")
         i += 1
+
+    if adb_mode:
+        print_adb_guide()
+        return
 
     if not files:
         print("❌ No valid files provided.")
@@ -1258,6 +1277,322 @@ def main():
     if compare_mode and len(all_stats) > 1:
         print(format_comparison(all_stats, all_metrics))
 
+    if csv_mode:
+        output_csv(all_stats, all_metrics)
+
+    if chart_mode:
+        for s, m in zip(all_stats, all_metrics):
+            print(format_degradation_chart(s, m))
+
+    if score_mode:
+        for s, m in zip(all_stats, all_metrics):
+            print(format_battery_score(s, m))
+
+    if history_mode:
+        for s, m in zip(all_stats, all_metrics):
+            save_history(s, m)
+        print(f"\n📁 History saved to .battery_history.json")
+
+    if adb_mode:
+        print_adb_guide()
+
+
+# ─── New Features ───────────────────────────────────────────────────────────
+
+
+def format_degradation_chart(stats: BatteryStats, metrics: dict) -> str:
+    """ASCII chart showing battery degradation over cycles."""
+    lines = []
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("  📉 BATTERY DEGRADATION CURVE")
+    lines.append("=" * 60)
+    lines.append("")
+
+    cycles = metrics.get("cycle_count", 0)
+    asoc = metrics.get("asoc_percent", 100)
+    deg = metrics.get("degradation_per_cycle", 0)
+
+    if cycles == 0 or deg == 0:
+        lines.append("  Not enough data for degradation chart.")
+        return "\n".join(lines)
+
+    chart_height = 12
+    chart_width = 40
+    max_cycles = int(cycles * 1.5)
+
+    lines.append(f"  {stats.device.model}")
+    lines.append(f"  Current: {cycles:.0f} cycles @ {asoc}% health")
+    lines.append("")
+
+    for row in range(chart_height, -1, -1):
+        health_at_row = 50 + (row / chart_height) * 50
+        label = f"  {health_at_row:>3.0f}% │"
+        bar = ""
+        for col in range(chart_width):
+            cycle_at_col = (col / chart_width) * max_cycles
+            health_at_col = 100 - (deg * cycle_at_col)
+            if health_at_col >= health_at_row and cycle_at_col <= cycles:
+                bar += "█"
+            elif cycle_at_col <= cycles:
+                bar += "░"
+            else:
+                bar += " "
+        lines.append(f"{label}{bar}")
+
+    lines.append(f"       └{'─' * chart_width}")
+    mid = max_cycles // 2
+    lines.append(
+        f"        0{' ' * (chart_width // 2 - 3)}{mid} cycles{' ' * (chart_width // 2 - 8)}{max_cycles}"
+    )
+    lines.append("")
+
+    if deg > 0:
+        lines.append("  📌 Key Milestones:")
+        lines.append(f"     90% health: ~{int((100 - 90) / deg)} cycles")
+        lines.append(
+            f"     80% health: ~{int((100 - 80) / deg)} cycles (replace threshold)"
+        )
+        lines.append(f"     70% health: ~{int((100 - 70) / deg)} cycles")
+        lines.append(f"     Current:    ~{int(cycles)} cycles @ {asoc}%")
+    lines.append("")
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def format_battery_score(stats: BatteryStats, metrics: dict) -> str:
+    """Calculate a composite battery score (0-100)."""
+    lines = []
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("  🏆 BATTERY SCORE")
+    lines.append("=" * 60)
+    lines.append("")
+
+    scores = {}
+    asoc = metrics.get("asoc_percent", 50)
+    scores["Health (ASOC)"] = min(asoc, 100)
+
+    cycles = metrics.get("cycle_count", 500)
+    if cycles < 100:
+        scores["Cycle Wear"] = 100
+    elif cycles < 300:
+        scores["Cycle Wear"] = 90
+    elif cycles < 500:
+        scores["Cycle Wear"] = 80
+    elif cycles < 800:
+        scores["Cycle Wear"] = 70
+    elif cycles < 1200:
+        scores["Cycle Wear"] = 60
+    elif cycles < 1500:
+        scores["Cycle Wear"] = 50
+    else:
+        scores["Cycle Wear"] = max(100 - (cycles - 1500) / 50, 10)
+
+    max_temp = metrics.get("max_temp_c", 40)
+    if max_temp < 40:
+        scores["Thermal"] = 100
+    elif max_temp < 45:
+        scores["Thermal"] = 90
+    elif max_temp < 50:
+        scores["Thermal"] = 80
+    elif max_temp < 55:
+        scores["Thermal"] = 70
+    elif max_temp < 60:
+        scores["Thermal"] = 60
+    elif max_temp < 70:
+        scores["Thermal"] = 40
+    else:
+        scores["Thermal"] = max(100 - (max_temp - 70) * 5, 5)
+
+    design = metrics.get("design_capacity_mah", 4000)
+    effective = metrics.get("effective_capacity_mah", design)
+    if design > 0:
+        scores["Capacity"] = min(effective / design * 100, 100)
+    else:
+        scores["Capacity"] = 50
+
+    weights = {
+        "Health (ASOC)": 0.40,
+        "Cycle Wear": 0.25,
+        "Thermal": 0.20,
+        "Capacity": 0.15,
+    }
+    total_score = round(sum(scores[k] * weights[k] for k in scores), 1)
+
+    if total_score >= 90:
+        grade, emoji = "S", "🏆"
+    elif total_score >= 80:
+        grade, emoji = "A", "🟢"
+    elif total_score >= 70:
+        grade, emoji = "B", "🟡"
+    elif total_score >= 60:
+        grade, emoji = "C", "🟠"
+    elif total_score >= 50:
+        grade, emoji = "D", "🔴"
+    else:
+        grade, emoji = "F", "💀"
+
+    lines.append(f"  {stats.device.model}")
+    lines.append("")
+    lines.append(f"  Overall Score:  {total_score}/100  {emoji} Grade: {grade}")
+    lines.append("")
+
+    for name, score in scores.items():
+        bar_len = int(score / 100 * 30)
+        bar = "█" * bar_len + "░" * (30 - bar_len)
+        lines.append(f"  {name:<15} {bar} {score:.0f}")
+
+    lines.append("")
+    lines.append("  💬 Verdict:")
+    if total_score >= 90:
+        lines.append("     Excellent condition. No action needed.")
+    elif total_score >= 80:
+        lines.append("     Healthy. Continue normal usage.")
+    elif total_score >= 70:
+        lines.append("     Aging. Monitor temperature and charging habits.")
+    elif total_score >= 60:
+        lines.append("     Showing wear. Consider replacing within 6 months.")
+    elif total_score >= 50:
+        lines.append("     Degraded. Replacement recommended.")
+    else:
+        lines.append("     End of life. Replace immediately.")
+
+    lines.append("")
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def output_csv(all_stats: list, all_metrics: list):
+    """Output CSV for spreadsheet analysis."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    headers = [
+        "Brand",
+        "Model",
+        "Android",
+        "ASOC%",
+        "BSOH%",
+        "Cycles",
+        "Design_mAh",
+        "Effective_mAh",
+        "MaxTemp_C",
+        "MaxCurrent_mA",
+        "HealthStatus",
+        "DegPerCycle%",
+        "CyclesTo80",
+        "RemainingMonths",
+        "File",
+        "Size_MB",
+    ]
+    writer.writerow(headers)
+    for s, m in zip(all_stats, all_metrics):
+        writer.writerow(
+            [
+                s.device.brand,
+                s.device.model,
+                s.device.android_version,
+                m.get("asoc_percent", ""),
+                m.get("bsoh_percent", ""),
+                m.get("cycle_count", ""),
+                m.get("design_capacity_mah", ""),
+                m.get("effective_capacity_mah", ""),
+                m.get("max_temp_c", ""),
+                m.get("max_current_ma", ""),
+                s.health.health_status,
+                m.get("degradation_per_cycle", ""),
+                m.get("cycles_to_80", ""),
+                m.get("est_remaining_months", ""),
+                s.file_name,
+                round(s.file_size_mb, 1),
+            ]
+        )
+    csv_str = buf.getvalue()
+    print(csv_str)
+    with open("battery_export.csv", "w") as f:
+        f.write(csv_str)
+    print("📁 CSV saved to battery_export.csv")
+
+
+def save_history(stats: BatteryStats, metrics: dict):
+    """Save snapshot to history for tracking over time."""
+    history_path = ".battery_history.json"
+    history = []
+    if os.path.exists(history_path):
+        with open(history_path, "r") as f:
+            try:
+                history = json.load(f)
+            except:
+                history = []
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "device": stats.device.model,
+        "brand": stats.device.brand,
+        "asoc": metrics.get("asoc_percent"),
+        "cycles": metrics.get("cycle_count"),
+        "max_temp": metrics.get("max_temp_c"),
+        "design_mah": metrics.get("design_capacity_mah"),
+        "effective_mah": metrics.get("effective_capacity_mah"),
+        "health_grade": metrics.get("health_grade"),
+        "file": stats.file_name,
+    }
+    history.append(entry)
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def print_adb_guide():
+    """Print universal ADB commands for battery data."""
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║  📱 UNIVERSAL ADB BATTERY COMMANDS                          ║
+║  Works on ANY Android phone with USB debugging enabled       ║
+╚══════════════════════════════════════════════════════════════╝
+
+  SETUP:
+    1. Enable Developer Options (tap Build Number 7 times)
+    2. Enable USB Debugging in Developer Options
+    3. Connect phone to PC via USB
+    4. Accept "Allow USB debugging" on phone
+
+  QUICK BATTERY INFO:
+    adb shell dumpsys battery
+
+  FULL BATTERY STATS:
+    adb shell dumpsys batterystats > battery_stats.txt
+
+  COMPLETE BUGREPORT (recommended):
+    adb bugreport > bugreport.txt
+
+  KERNEL BATTERY DATA:
+    adb shell cat /sys/class/power_supply/battery/cycle_count
+    adb shell cat /sys/class/power_supply/battery/charge_full
+    adb shell cat /sys/class/power_supply/battery/charge_full_design
+    adb shell cat /sys/class/power_supply/battery/temp
+    adb shell cat /sys/class/power_supply/battery/voltage_now
+
+  BRAND-SPECIFIC (opens diagnostic menu):
+    Samsung:    adb shell am start -a android.intent.action.DIAL -d tel:*%239900%23
+    Xiaomi:     adb shell am start -a android.intent.action.DIAL -d tel:*%23*%23284%23*%23*
+    Realme:     adb shell am start -a android.intent.action.DIAL -d tel:*%23800%23
+
+  BATTERY HISTORY TRACKING:
+    adb shell dumpsys batterystats --reset    # reset counters
+    ... use phone normally ...
+    adb bugreport > bugreport.zip
+
+  THEN ANALYZE:
+    python3 battery_analyzer.py bugreport.txt
+    python3 battery_analyzer.py bugreport.txt --score
+    python3 battery_analyzer.py bugreport.txt --chart
+    python3 battery_analyzer.py bugreport.txt --csv
+    python3 battery_analyzer.py bugreport.txt --history
+
+╚══════════════════════════════════════════════════════════════╝
+""")
 
 if __name__ == "__main__":
     main()
