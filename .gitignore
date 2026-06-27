@@ -4,3 +4,10 @@
 !README.md
 !battery_analyzer.py
 !.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
