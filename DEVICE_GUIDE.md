@@ -350,3 +350,124 @@ From the extracted `com.coloros.zip`:
 
 ### Recommendation for Full Battery Data
 **Use ADB method** — it's the most reliable way to get cycle count and health data from the Narzo 10. The logkit is more for debugging than battery health.
+
+---
+
+## 🔧 Termux on Realme Narzo 10 — Complete Procedure
+
+### Can Termux Work on Narzo 10?
+**Yes!** Termux works on Realme Narzo 10 (RMX2040). It runs Android 10+ with MediaTek Helio G80, which is fully compatible.
+
+### Step-by-Step Setup
+
+#### 1. Install Termux
+- Download from **F-Droid** (recommended) or GitHub
+- **DO NOT use Play Store version** (it's outdated and broken)
+- F-Droid link: https://f-droid.org/en/packages/com.termux/
+- Or GitHub releases: https://github.com/termux/termux-app/releases
+
+#### 2. Initial Setup
+Open Termux and run:
+```bash
+# Update packages
+pkg update && pkg upgrade
+
+# Install required tools
+pkg install python coreutils grep sed
+```
+
+#### 3. Get Battery Data via Termux
+
+**Method A: Read sysfs directly (no root needed)**
+```bash
+# Cycle count
+cat /sys/class/power_supply/battery/cycle_count
+
+# Current capacity (mAh)
+cat /sys/class/power_supply/battery/charge_full
+
+# Design capacity (mAh)
+cat /sys/class/power_supply/battery/charge_full_design
+
+# Temperature (divide by 10 for °C)
+cat /sys/class/power_supply/battery/temp
+
+# Voltage (divide by 1000 for mV)
+cat /sys/class/power_supply/battery/voltage_now
+
+# Current (divide by 1000 for mA, negative = discharging)
+cat /sys/class/power_supply/battery/current_now
+
+# Status (Charging/Discharging/Full)
+cat /sys/class/power_supply/battery/status
+
+# Health (Good/Overheat/Dead/etc)
+cat /sys/class/power_supply/battery/health
+
+# Battery level (%)
+cat /sys/class/power_supply/battery/capacity
+```
+
+**Method B: Use dumpsys (requires ADB or root)**
+```bash
+# If ADB over TCP is enabled:
+dumpsys battery
+
+# Or parse battery info:
+dumpsys batterystats | head -50
+```
+
+**Method C: Quick one-liner**
+```bash
+# All battery info at once:
+echo "=== Battery Info ===" && \
+echo "Cycles: $(cat /sys/class/power_supply/battery/cycle_count 2>/dev/null || echo 'N/A')" && \
+echo "Capacity: $(cat /sys/class/power_supply/battery/charge_full 2>/dev/null || echo 'N/A') mAh" && \
+echo "Design: $(cat /sys/class/power_supply/battery/charge_full_design 2>/dev/null || echo 'N/A') mAh" && \
+echo "Temp: $(($(cat /sys/class/power_supply/battery/temp 2>/dev/null || echo 0) / 10))°C" && \
+echo "Voltage: $(($(cat /sys/class/power_supply/battery/voltage_now 2>/dev/null || echo 0) / 1000)) mV" && \
+echo "Level: $(cat /sys/class/power_supply/battery/capacity 2>/dev/null || echo 'N/A')%" && \
+echo "Status: $(cat /sys/class/power_supply/battery/status 2>/dev/null || echo 'N/A')"
+```
+
+#### 4. Copy Data to PC
+```bash
+# Option 1: Save to file and share via Telegram
+battery_info.txt
+cat /sys/class/power_supply/battery/* > battery_dump.txt
+# Then share battery_dump.txt via Telegram
+
+# Option 2: Use Termux:API for clipboard
+pkg install termux-api
+cat /sys/class/power_supply/battery/cycle_count | termux-clipboard-set
+# Then paste on PC
+
+# Option 3: Use termux-file-editor
+# Share files directly from Termux
+```
+
+#### 5. Analyze with Our Tool
+```bash
+# On your Mac, after getting the file:
+python3 battery_analyzer.py battery_dump.txt --brand realme
+```
+
+### Narzo 10 Specific sysfs Paths
+```
+/sys/class/power_supply/battery/cycle_count      → Cycle count
+/sys/class/power_supply/battery/charge_full       → Current full capacity (mAh)
+/sys/class/power_supply/battery/charge_full_design → Design capacity (mAh)
+/sys/class/power_supply/battery/temp              → Temperature (÷10 = °C)
+/sys/class/power_supply/battery/voltage_now       → Voltage (÷1000 = mV)
+/sys/class/power_supply/battery/current_now       → Current (÷1000 = mA)
+/sys/class/power_supply/battery/status            → Charging/Discharging/Full
+/sys/class/power_supply/battery/health            → Good/Overheat/Dead
+/sys/class/power_supply/battery/capacity          → Level (%)
+/sys/class/power_supply/battery/technology        → Li-ion/Li-poly
+```
+
+### Important Notes for Narzo 10
+- **No root needed** for sysfs reads
+- **Termux from F-Droid only** — Play Store version is broken
+- **Some paths may differ** on ColorOS/Realme UI — if one path doesn't work, try alternatives
+- **If cycle_count shows N/A**, the kernel may not expose it — use `adb shell dumpsys battery` instead

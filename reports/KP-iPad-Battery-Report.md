@@ -1,6 +1,6 @@
 # 🔋 iPad Battery Report
 
-> **Owner:** KP | **Date:** June 27, 2026 | **Source:** PowerUtil Shortcut + Analytics File
+> **Owner:** KP | **Date:** June 27, 2026 | **Purchased:** December 19, 2018 | **Source:** PowerUtil Shortcut + Analytics File
 
 ---
 
