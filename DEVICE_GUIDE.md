@@ -471,3 +471,15 @@ python3 battery_analyzer.py battery_dump.txt --brand realme
 - **Termux from F-Droid only** — Play Store version is broken
 - **Some paths may differ** on ColorOS/Realme UI — if one path doesn't work, try alternatives
 - **If cycle_count shows N/A**, the kernel may not expose it — use `adb shell dumpsys battery` instead
+
+---
+
+### iQOO / Vivo
+1. Dial `*#*#556688#*#*` → Factory Test → Battery
+2. Or: `adb bugreport`
+3. Or: Settings → Battery → Battery Health
+
+**Direct analysis:**
+```bash
+python3 battery_analyzer.py bugreport.txt --brand vivo
+```

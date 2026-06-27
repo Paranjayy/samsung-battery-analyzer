@@ -682,6 +682,28 @@ class XiaomiParser:
             stats.device.model_code = m.group(1)
 
 
+
+class VivoParser:
+    """Parser for iQOO/Vivo bugreports and diagnostic data.
+    
+    How to get battery data on iQOO/Vivo:
+    1. Dial *#*#556688#*#* for Factory Test
+    2. Or: adb bugreport
+    3. Or: Settings → Battery → Battery Health
+    """
+
+    @staticmethod
+    def can_parse(file_path: str, first_lines: str) -> bool:
+        indicators = ["iqoo", "IQOO", "vivo", "VIVO", "Vivo", 
+                       "funtouch", "Funtouch", "originos", "OriginOS"]
+        return any(ind in first_lines for ind in indicators)
+
+    @staticmethod
+    def parse(file_path: str, stats: BatteryStats):
+        stats.parser_brand = "iQOO/Vivo"
+        stats.device.brand = "iQOO/Vivo"
+        XiaomiParser.parse(file_path, stats)  # Same sysfs format
+
 class GenericParser:
     """Generic parser for any Android bugreport or dumpstate file.
 
@@ -822,7 +844,7 @@ class GenericParser:
 
 # ─── Parser Registry ────────────────────────────────────────────────────────
 
-PARSERS = [
+PARSERS = [("vivo", VivoParser),
     ("samsung", SamsungParser),
     ("realme", RealmeParser),
     ("xiaomi", XiaomiParser),

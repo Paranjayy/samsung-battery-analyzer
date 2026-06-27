@@ -1,6 +1,6 @@
 # 🔋 Samsung Galaxy S25 Ultra Battery Report
 
-> **Owner:** Papa | **Date:** June 27, 2026 | **Source:** SysDump (Samsung *#9900#*)
+> **Owner:** Papa | **Date:** June 27, 2026 | **Purchased:** May 14, 2025 | **Source:** SysDump (Samsung *#9900#)
 
 ---
 

@@ -1,6 +1,6 @@
 # 🔋 MacBook Battery Report
 
-> **Owner:** KP | **Date:** June 27, 2026 | **Source:** macOS system_profiler + ioreg
+> **Owner:** KP | **Date:** June 27, 2026 | **Purchased:** December 25, 2021 | **Source:** macOS system_profiler + ioreg
 
 ---
 
