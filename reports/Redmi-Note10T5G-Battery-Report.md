@@ -1,4 +1,4 @@
-# 🔋 Xiaomi Redmi Note 11 Pro Battery Report
+# 🔋 Xiaomi Redmi Note 10T 5G Battery Report
 
 > **Date:** August 7, 2026 | **Source:** Redmi Diagnostics (*#*#284#*#*)
 
@@ -8,7 +8,7 @@
 
 | Field | Value |
 |-------|-------|
-| Model | Xiaomi Redmi Note 11 Pro (M2103K19I) |
+| Model | Xiaomi Redmi Note 10T 5G (M2103K19I) |
 | Codename | camellia_in |
 | Android | 13 (SDK 33) |
 | MIUI | 14 (V14.0.6.0.TKSINXM) |
@@ -51,7 +51,7 @@ Slightly warm but within normal range. The phone was likely in use or charging w
 Healthy voltage level. Li-poly batteries operate between 3.0V (empty) and 4.2V (full). At 4.013V, the battery is in its optimal discharge range.
 
 ### Charging: USB Only (500mA)
-The phone is charging via USB at only 500mA — this is USB 2.0 standard speed. Very slow. The Redmi Note 11 Pro supports **67W turbo charging** but requires a compatible charger and cable.
+The phone is charging via USB at only 500mA — this is USB 2.0 standard speed. Very slow. The Redmi Note 10T 5G supports **18W fast charging** (22.5W charger included in box) but requires a compatible charger and cable.
 
 ---
 
@@ -129,7 +129,7 @@ The phone is charging via USB at only 500mA — this is USB 2.0 standard speed. 
 | Skin | 41.2°C | 🟡 Warm |
 
 ### Thermal Status: **Normal**
-No thermal throttling active. The CPU/GPU hit 57.5°C during initial boot-up (normal for MediaTek Helio G96), but settled down to 45.6°C during regular use.
+No thermal throttling active. The CPU/GPU hit 57.5°C during initial boot-up (normal for MediaTek Dimensity 700), but settled down to 45.6°C during regular use.
 
 ---
 
@@ -174,9 +174,8 @@ No thermal throttling active. The CPU/GPU hit 57.5°C during initial boot-up (no
 |--------------|---------|-------|--------------------------|
 | **USB 2.0 (current)** | 500 mA | 2.5W | ~4-5 hours |
 | USB 3.0 | 900 mA | 4.5W | ~3 hours |
-| 18W QC | 2,000 mA | 18W | ~1.5 hours |
-| 33W QC | 3,000 mA | 33W | ~1 hour |
-| **67W Turbo (max)** | 6,000 mA | 67W | ~35 minutes |
+| **18W Fast (max supported)** | 2,000 mA | 18W | ~1.5 hours |
+| 22.5W (in-box charger) | 2,250 mA | 22.5W | ~1.2 hours |
 
 **Recommendation:** Use the original 67W charger or a QC 3.0+ compatible charger for fast charging. USB charging at 500mA is extremely slow.
 
@@ -202,19 +201,22 @@ No thermal throttling active. The CPU/GPU hit 57.5°C during initial boot-up (no
 | Estimated Purchase | Late 2023 / Early 2024 |
 | Estimated Age | ~2-3 years |
 | Health Status | Good |
+| Launch Date | July 2021 |
 
 ---
 
 ## 🧠 Interesting Findings
 
-1. **MediaTek Helio G96** — mid-range chipset, efficient but not powerful
-2. **67W turbo charging supported** — but only 500mA USB charging captured
+1. **MediaTek Dimensity 700** — 5G-capable mid-range chipset, 7nm architecture
+2. **18W fast charging supported** (22.5W in-box) — but only 500mA USB charging captured
 3. **MIUI 14** — latest MIUI version for this device
 4. **3.5 GB RAM** — modest for 2026, but sufficient for light usage
 5. **HappyMod installed** — modded app store, potential security risk
 6. **Bluetooth active** — likely connected to accessories
 7. **WiFi excellent (4/4)** — strong signal, good for battery
 8. **Phone signal great** — good cellular reception
+9. **5G capable** — first 5G phone from Redmi Note series
+10. **5000mAh battery** — large capacity for all-day usage
 
 ---
 
@@ -222,7 +224,7 @@ No thermal throttling active. The CPU/GPU hit 57.5°C during initial boot-up (no
 
 ### Immediate Actions
 
-1. **Use proper charger** — the 67W turbo charger will charge 13x faster than USB
+1. **Use proper charger** — the 18W fast charger (22.5W in-box) will charge 7x faster than USB
 2. **Check HappyMod** — modded apps can drain battery and pose security risks
 3. **Monitor background apps** — Facebook and YouTube running in background
 
