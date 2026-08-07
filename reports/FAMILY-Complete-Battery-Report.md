@@ -1,6 +1,6 @@
 # 👨‍👩‍👧‍👦 Family Device Battery Report
 
-> **Date:** June 27, 2026 | **All devices analyzed**
+> **Date:** July 10, 2026 | **All devices analyzed**
 
 ---
 
@@ -9,16 +9,17 @@
 | # | Device | Owner | Health | Real % | Cycles | Max Temp | Score | Status |
 |---|--------|-------|--------|--------|--------|----------|-------|--------|
 | 1 | Samsung Galaxy S25 Ultra | Papa | 🟢 99% | 99% | 326 | 52.6°C | 87.3 | ✅ Excellent |
-| 2 | iPad (7th Gen?) | You | ⚠️ 100%* | **~75%** | 773 | 48.7°C | ❓ | 🟠 Aging |
-| 3 | Samsung Galaxy S24 | Pujit | 🟡 91% | 91% | 503 | 75.9°C | 82.4 | ⚠️ Hot |
-| 4 | MacBook Air/Pro | You | ⚠️ 100%* | **~75%** | 447 | 46.1°C | ❓ | 🔴 Service Rec. |
-| 5 | Samsung Galaxy A31 | KP (You) | 🟡 91% | 91% | 1456 | 53.8°C | 77.9 | 🟡 Warrior |
-| 6 | Realme Narzo 10 | Mummy | ✅ Good | ~80-85%† | — | 37.0°C | ❓ | ✅ Healthy |
-| 7 | Samsung Tab (Model TBD) | Family | ❓ | ❓ | ❓ | ❓ | ❓ | Barely used |
-| 8 | Sony Headphones | You | — | — | — | — | — | N/A |
-| 9 | PC/Desktop | Family | — | — | — | — | — | N/A |
-| 10 | Dead Laptop | — | 💀 | — | — | — | — | Dead |
-| 11+ | Previous dead phones | Various | 💀 | — | — | — | — | Dead |
+| 2 | Samsung Galaxy S24 | **Bhupendra (bro)** | 🟢 **98%** | 98% | **159** | **48.3°C** | **92.1** | ✅ **Pristine** |
+| 3 | iPad (7th Gen?) | You | ⚠️ 100%* | **~75%** | 773 | 48.7°C | ❓ | 🟠 Aging |
+| 4 | Samsung Galaxy S24 | Pujit | 🟡 91% | 91% | 503 | 75.9°C | 82.4 | ⚠️ Hot |
+| 5 | MacBook Air/Pro | You | ⚠️ 100%* | **~75%** | 447 | 46.1°C | ❓ | 🔴 Service Rec. |
+| 6 | Samsung Galaxy A31 | KP (You) | 🟡 91% | 91% | 1456 | 53.8°C | 77.9 | 🟡 Warrior |
+| 7 | Realme Narzo 10 | Mummy | ✅ Good | ~80-85%† | — | 37.0°C | ❓ | ✅ Healthy |
+| 8 | Samsung Tab (Model TBD) | Family | ❓ | ❓ | ❓ | ❓ | ❓ | Barely used |
+| 9 | Sony Headphones | You | — | — | — | — | — | N/A |
+| 10 | PC/Desktop | Family | — | — | — | — | — | N/A |
+| 11 | Dead Laptop | — | 💀 | — | — | — | — | Dead |
+| 12+ | Previous dead phones | Various | 💀 | — | — | — | — | Dead |
 
 *Apple shows 100% but raw data says ~75%
 †Estimated from "Good" health status + 4 years age
@@ -40,6 +41,24 @@
 | Age | ~1 year |
 
 **Verdict:** Basically brand new. Will outlast the phone itself. No action needed.
+
+---
+
+### 2. Samsung Galaxy S24 (Bhupendra - bro) 🆕
+| Field | Value |
+|-------|-------|
+| Score | **92.1/100** 🟢 Grade A+ |
+| ASOC | **98%** |
+| BSOH | **100%** (perfect!) |
+| Cycles | **159** |
+| Design | 3,860 mAh |
+| Max Temp | **48.3°C** 🌟 |
+| First Use | Feb 9, 2026 |
+| Age | ~5 months |
+
+**Verdict:** This is the **best-conditioned battery in the family.** Only 5 months old, 98% capacity, 100% internal resistance health, and never went above 50°C. Whoever has been using this phone has been incredibly gentle on it. At 0.95 cycles/day with current trajectory, this battery will easily last **3+ years** before hitting 80%.
+
+**Top drainers (last cycle):** WhatsApp (73 mAh), Snapchat (67 mAh), Phone calls (57 mAh), Maps (47 mAh).
 
 ---
 
@@ -180,12 +199,13 @@ Realme/ColorOS **intentionally hides** battery cycle count from:
 
 | Rank | Device | Deg/Cycle | Est. Remaining | Winner? |
 |------|--------|-----------|----------------|---------|
-| 1 | S25 Ultra | 0.31% | 18+ years | 🏆 |
-| 2 | A31 | 0.62% | 64 months | 🏆 Warrior |
-| 3 | Narzo 10 | ~0.5%† | ~24 months | ✅ |
-| 4 | S24 | 1.79% | 22 months | ⚠️ |
-| 5 | iPad | ~0.03% | ~14 months | 🟠 |
-| 6 | MacBook | ~0.06% | ~7 months | 🔴 |
+| 1 | **S24 (Bhupendra)** | **0.013%** | **~36+ months** | 🏆 **Pristine** |
+| 2 | S25 Ultra | 0.31% | 18+ years | 🏆 |
+| 3 | A31 | 0.62% | 64 months | 🏆 Warrior |
+| 4 | Narzo 10 | ~0.5%† | ~24 months | ✅ |
+| 5 | S24 (Pujit) | 1.79% | 22 months | ⚠️ |
+| 6 | iPad | ~0.03% | ~14 months | 🟠 |
+| 7 | MacBook | ~0.06% | ~7 months | 🔴 |
 
 †Estimated based on "Good" health at ~1,000 cycles
 
@@ -197,7 +217,8 @@ Realme/ColorOS **intentionally hides** battery cycle count from:
 |----------|--------|--------|------|
 | 🔴 High | MacBook | Battery replacement at Apple Store | ₹8-12K |
 | 🟡 Medium | iPad | Monitor — replace in 12-18 months | ₹8-12K |
-| 🟡 Medium | S24 | Stop charging while gaming | Free |
+| 🟡 Medium | S24 (Pujit) | Stop charging while gaming | Free |
+| ✅ None | **S24 (Bhupendra)** | **No action — battery is pristine!** | **🎉** |
 | 🟢 Low | Narzo 10 | Install AccuBattery for tracking | Free |
 | 🟢 Low | Samsung Tab | Check if battery needs attention | Free |
 | ✅ None | S25 Ultra | No action needed | — |
